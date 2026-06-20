@@ -21,11 +21,11 @@ function loadImage(file) {
 
 // スマホのカメラ写真は非常に高解像度（数千px・数MB）になることがあるため、
 // 読み込み速度やメモリ使用量を抑える目的で長辺を MAX_DIMENSION に縮小し、
-// JPEG品質を調整する。保存先がIndexedDBになったため容量自体の制約は
-// 大きく緩和されているが、表示・読み込みパフォーマンスのため引き続き圧縮する。
-const MAX_DIMENSION = 1600;
-const INITIAL_JPEG_QUALITY = 0.82;
-const TARGET_MAX_BYTES = 1500 * 1024; // dataURL文字列の目安上限
+// JPEG品質を調整する。保存先がIndexedDBになり容量制約は大きく緩和されたため、
+// 「フリップカードで見た時に文字が鮮明に読める」ことを優先し、画質を高めに設定する。
+const MAX_DIMENSION = 2000;
+const INITIAL_JPEG_QUALITY = 0.9;
+const TARGET_MAX_BYTES = 3500 * 1024; // dataURL文字列の目安上限（大きめに許容）
 
 function resizeImage(src, originalWidth, originalHeight) {
   return new Promise((resolve) => {
@@ -45,7 +45,7 @@ function resizeImage(src, originalWidth, originalHeight) {
       let dataUrl = canvas.toDataURL("image/jpeg", quality);
       let attempts = 0;
       while (dataUrl.length > TARGET_MAX_BYTES && attempts < 3) {
-        quality = Math.max(0.35, quality - 0.15);
+        quality = Math.max(0.5, quality - 0.12);
         dataUrl = canvas.toDataURL("image/jpeg", quality);
         attempts++;
       }
@@ -73,11 +73,12 @@ function cropImage(srcImg, rect) {
       const ctx = canvas.getContext("2d");
       ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, w, h);
 
-      let quality = 0.85;
+      // トリミング後のカード画像は学習中に拡大して見るため、できるだけ高品質を優先する
+      let quality = 0.94;
       let dataUrl = canvas.toDataURL("image/jpeg", quality);
       let attempts = 0;
       while (dataUrl.length > TARGET_MAX_BYTES && attempts < 3) {
-        quality = Math.max(0.35, quality - 0.15);
+        quality = Math.max(0.5, quality - 0.12);
         dataUrl = canvas.toDataURL("image/jpeg", quality);
         attempts++;
       }
@@ -87,14 +88,55 @@ function cropImage(srcImg, rect) {
   });
 }
 
+// 自由な形（多角形）でのトリミング。選択範囲外は透過にするため出力はPNG。
+// pathPoints は原画像のピクセル座標系での多角形の頂点列。
+function cropImageFreeform(srcImg, pathPoints) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const xs = pathPoints.map((p) => p.x);
+      const ys = pathPoints.map((p) => p.y);
+      const minX = Math.max(0, Math.min(...xs));
+      const minY = Math.max(0, Math.min(...ys));
+      const maxX = Math.max(...xs);
+      const maxY = Math.max(...ys);
+      const w = Math.max(1, Math.round(maxX - minX));
+      const h = Math.max(1, Math.round(maxY - minY));
+
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+
+      // 多角形パスをクリップ領域として設定してから画像を描画することで、
+      // パスの外側は透過のまま残る
+      ctx.save();
+      ctx.beginPath();
+      pathPoints.forEach((p, i) => {
+        const x = p.x - minX;
+        const y = p.y - minY;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.closePath();
+      ctx.clip();
+      ctx.drawImage(img, -minX, -minY);
+      ctx.restore();
+
+      resolve(canvas.toDataURL("image/png"));
+    };
+    img.src = srcImg;
+  });
+}
+
 // ---------- 永続化（IndexedDB、storage.js経由） ----------
 const STORAGE_META_KEY = "math-flashcards:meta:v1";
 
-async function saveMeta(decks, cards, photoLibrary) {
+async function saveMeta(decks, cards, photoLibrary, photoGroups) {
   // 画像本体(frontSrc/backSrc/src)は別キーに保存するため、メタには含めない
   const cardsMeta = cards.map(({ frontSrc, backSrc, ...rest }) => rest);
   const photosMeta = photoLibrary.map(({ src, ...rest }) => rest);
-  const payload = { decks, cards: cardsMeta, photos: photosMeta };
+  const payload = { decks, cards: cardsMeta, photos: photosMeta, photoGroups };
   try {
     await storage.set(STORAGE_META_KEY, JSON.stringify(payload));
   } catch (e) {
@@ -159,7 +201,7 @@ async function loadAll() {
   }
   if (!meta) return null;
 
-  const { decks = [], cards: cardsMeta = [], photos: photosMeta = [] } = meta;
+  const { decks = [], cards: cardsMeta = [], photos: photosMeta = [], photoGroups = [] } = meta;
 
   // 画像本体を並列取得
   const photoResults = await Promise.all(
@@ -192,6 +234,7 @@ async function loadAll() {
     decks,
     cards: cardResults.filter((c) => c.frontType === "text" ? !!c.frontText : !!c.frontSrc),
     photoLibrary: photoResults.filter((p) => p.src),
+    photoGroups,
   };
 }
 
@@ -203,7 +246,8 @@ export default function MathFlashcards() {
   const [activeDeckId, setActiveDeckId] = useState(null);
   const [activeCardId, setActiveCardId] = useState(null);
   const [studyQueue, setStudyQueue] = useState(null); // {cardIds, mode}
-  const [photoLibrary, setPhotoLibrary] = useState([]); // {id, src, width, height, addedAt}
+  const [photoLibrary, setPhotoLibrary] = useState([]); // {id, src, width, height, addedAt, groupId}
+  const [photoGroups, setPhotoGroups] = useState([]); // {id, name}
   const [loading, setLoading] = useState(true);
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved | error
   const [saveErrorDetail, setSaveErrorDetail] = useState(null);
@@ -219,6 +263,7 @@ export default function MathFlashcards() {
         setDecks(data.decks);
         setCards(data.cards);
         setPhotoLibrary(data.photoLibrary);
+        setPhotoGroups(data.photoGroups || []);
         // 復元済みの画像はそのまま「保存済み」として記録し、無駄な再保存を防ぐ
         data.cards.forEach((c) => {
           if (c.frontSrc) savedImagesRef.current.set(`card-front:${c.id}`, c.frontSrc);
@@ -233,7 +278,7 @@ export default function MathFlashcards() {
     })();
   }, []);
 
-  // decks/cards/photoLibrary の変化を検知して保存する（読み込み完了後のみ、デバウンス付き）
+  // decks/cards/photoLibrary/photoGroups の変化を検知して保存する（読み込み完了後のみ、デバウンス付き）
   useEffect(() => {
     if (!hasLoadedRef.current) return;
     setSaveState("saving");
@@ -242,7 +287,8 @@ export default function MathFlashcards() {
         await saveMeta(
           decks,
           cards.map((c) => ({ ...c, backSrcExists: !!c.backSrc })),
-          photoLibrary
+          photoLibrary,
+          photoGroups
         );
         const imageTasks = [
           ...cards.flatMap((c) => [
@@ -278,14 +324,34 @@ export default function MathFlashcards() {
       }
     }, 600);
     return () => clearTimeout(timer);
-  }, [decks, cards, photoLibrary]);
+  }, [decks, cards, photoLibrary, photoGroups]);
 
   const deckCards = (deckId) => cards.filter((c) => c.deckId === deckId);
 
-  function addPhotoToLibrary(img) {
-    const entry = { id: uid(), ...img, addedAt: Date.now() };
+  function addPhotoToLibrary(img, groupId = null) {
+    const entry = { id: uid(), ...img, groupId, addedAt: Date.now() };
     setPhotoLibrary((prev) => [entry, ...prev]);
     return entry;
+  }
+
+  function createPhotoGroup(name) {
+    const id = uid();
+    setPhotoGroups((prev) => [...prev, { id, name }]);
+    return id;
+  }
+
+  function renamePhotoGroup(groupId, name) {
+    setPhotoGroups((prev) => prev.map((g) => (g.id === groupId ? { ...g, name } : g)));
+  }
+
+  function deletePhotoGroup(groupId) {
+    setPhotoGroups((prev) => prev.filter((g) => g.id !== groupId));
+    // グループに属していた写真は「未分類」に戻す（写真自体は消さない）
+    setPhotoLibrary((prev) => prev.map((p) => (p.groupId === groupId ? { ...p, groupId: null } : p)));
+  }
+
+  function setPhotoGroup(photoId, groupId) {
+    setPhotoLibrary((prev) => prev.map((p) => (p.id === photoId ? { ...p, groupId } : p)));
   }
 
   function createDeck(name) {
@@ -333,7 +399,7 @@ export default function MathFlashcards() {
   }
 
   async function exportAllData() {
-    const payload = { version: 1, exportedAt: Date.now(), decks, cards, photoLibrary };
+    const payload = { version: 2, exportedAt: Date.now(), decks, cards, photoLibrary, photoGroups };
     return JSON.stringify(payload);
   }
 
@@ -346,6 +412,7 @@ export default function MathFlashcards() {
       setDecks(data.decks);
       setCards(data.cards);
       setPhotoLibrary(data.photoLibrary || []);
+      setPhotoGroups(data.photoGroups || []);
       return { ok: true };
     } catch (e) {
       return { ok: false, error: e.message };
@@ -413,6 +480,10 @@ export default function MathFlashcards() {
         <CaptureScreen
           library={photoLibrary}
           onAddPhoto={addPhotoToLibrary}
+          photoGroups={photoGroups}
+          onCreateGroup={createPhotoGroup}
+          onSetPhotoGroup={setPhotoGroup}
+          onDeleteGroup={deletePhotoGroup}
           onCancel={() => setScreen("home")}
           onCreate={(name, newCards) => {
             const id = createDeck(name);
@@ -447,6 +518,10 @@ export default function MathFlashcards() {
           card={cards.find((c) => c.id === activeCardId)}
           library={photoLibrary}
           onAddPhoto={addPhotoToLibrary}
+          photoGroups={photoGroups}
+          onCreateGroup={createPhotoGroup}
+          onSetPhotoGroup={setPhotoGroup}
+          onDeleteGroup={deletePhotoGroup}
           onBack={() => setScreen("deck")}
           onUpdate={(patch) => updateCard(activeCardId, patch)}
           onDelete={() => {
@@ -462,6 +537,10 @@ export default function MathFlashcards() {
           addMode
           library={photoLibrary}
           onAddPhoto={addPhotoToLibrary}
+          photoGroups={photoGroups}
+          onCreateGroup={createPhotoGroup}
+          onSetPhotoGroup={setPhotoGroup}
+          onDeleteGroup={deletePhotoGroup}
           deckName={decks.find((d) => d.id === activeDeckId)?.name}
           onCancel={() => setScreen("deck")}
           onCreate={(_, newCards) => {
@@ -806,7 +885,18 @@ function DeckPickerScreen({ decks, cards, onBack, onStart }) {
 }
 
 // ---------- 撮影・トリミング画面 ----------
-function CaptureScreen({ onCancel, onCreate, addMode, deckName, library = [], onAddPhoto }) {
+function CaptureScreen({
+  onCancel,
+  onCreate,
+  addMode,
+  deckName,
+  library = [],
+  onAddPhoto,
+  photoGroups = [],
+  onCreateGroup,
+  onSetPhotoGroup,
+  onDeleteGroup,
+}) {
   // upload-or-pick(front/back) → crop(front/back) → more-or-back → name
   // step は履歴スタックとして保持し、「戻る」で1つ前のステップに戻れるようにする
   const [stepStack, setStepStack] = useState([library.length > 0 ? "pick-front" : "upload-front"]);
@@ -840,12 +930,12 @@ function CaptureScreen({ onCancel, onCreate, addMode, deckName, library = [], on
   }
 
   // 「アップロードする」: 複数枚まとめてライブラリに追加（トリミングはあとでライブラリから選んで行う）
-  async function handleUploadFiles(e) {
+  async function handleUploadFiles(e, groupId) {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
     for (const file of files) {
       const img = await loadAndResizeImage(file);
-      onAddPhoto(img);
+      onAddPhoto(img, groupId || null);
     }
     e.target.value = "";
   }
@@ -906,10 +996,14 @@ function CaptureScreen({ onCancel, onCreate, addMode, deckName, library = [], on
           title="① 問題文が写った写真を選ぶ"
           subtitle="基本は写真からの切り出しがおすすめです（指数や分数がきれいに残ります）"
           library={library}
+          photoGroups={photoGroups}
           onPickLibrary={(p) => pickFromLibrary(p, "crop-front")}
           onCameraShot={(e) => handleCameraShot(e, "crop-front")}
           onUploadFiles={handleUploadFiles}
           onUseText={handleFrontText}
+          onCreateGroup={onCreateGroup}
+          onSetPhotoGroup={onSetPhotoGroup}
+          onDeleteGroup={onDeleteGroup}
         />
       )}
 
@@ -928,11 +1022,15 @@ function CaptureScreen({ onCancel, onCreate, addMode, deckName, library = [], on
           title="② 答えが写った写真を選ぶ"
           subtitle="表と同じ写真でも、別の写真でもかまいません"
           library={library}
+          photoGroups={photoGroups}
           onPickLibrary={(p) => pickFromLibrary(p, "crop-back")}
           onCameraShot={(e) => handleCameraShot(e, "crop-back")}
           onUploadFiles={handleUploadFiles}
           onUseText={handleBackText}
           onSkip={handleBackSkip}
+          onCreateGroup={onCreateGroup}
+          onSetPhotoGroup={onSetPhotoGroup}
+          onDeleteGroup={onDeleteGroup}
         />
       )}
 
@@ -1032,19 +1130,80 @@ function CaptureScreen({ onCancel, onCreate, addMode, deckName, library = [], on
 }
 
 // ---------- 写真ピッカー（ライブラリ選択・新規アップロード・テキスト入力・スキップ） ----------
-function PhotoPicker({ title, subtitle, library, onPickLibrary, onCameraShot, onUploadFiles, onUseText, onSkip }) {
+function PhotoPicker({
+  title,
+  subtitle,
+  library,
+  photoGroups,
+  onPickLibrary,
+  onCameraShot,
+  onUploadFiles,
+  onUseText,
+  onSkip,
+  onCreateGroup,
+  onSetPhotoGroup,
+  onDeleteGroup,
+}) {
   const cameraRef = useRef(null);
   const uploadRef = useRef(null);
   const [textMode, setTextMode] = useState(false);
   const [textValue, setTextValue] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [activeTab, setActiveTab] = useState("all"); // "all" | "unsorted" | groupId
+  const [organizing, setOrganizing] = useState(false); // グループ整理モード
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [newGroupName, setNewGroupName] = useState("");
+  const [showNewGroupInput, setShowNewGroupInput] = useState(false);
+
+  // 番号はアップロード順（古い順）で固定。並び順を変えても番号がブレないようにする。
+  const numbered = [...library]
+    .sort((a, b) => a.addedAt - b.addedAt)
+    .map((p, i) => ({ ...p, number: i + 1 }));
+  const numberById = new Map(numbered.map((p) => [p.id, p.number]));
+
+  // 表示用：最新が上に来るよう新しい順、ただし番号は上の固定値を使う
+  const displayList = [...numbered].sort((a, b) => b.addedAt - a.addedAt);
+
+  const visibleList = displayList.filter((p) => {
+    if (activeTab === "all") return true;
+    if (activeTab === "unsorted") return !p.groupId;
+    return p.groupId === activeTab;
+  });
 
   async function handleUploadChange(e) {
     setUploading(true);
     try {
-      await onUploadFiles(e);
+      await onUploadFiles(e, activeTab !== "all" && activeTab !== "unsorted" ? activeTab : null);
     } finally {
       setUploading(false);
+    }
+  }
+
+  function toggleSelect(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function assignSelectedToGroup(groupId) {
+    selectedIds.forEach((id) => onSetPhotoGroup(id, groupId));
+    setSelectedIds(new Set());
+    setOrganizing(false);
+  }
+
+  function handleCreateGroup() {
+    const name = newGroupName.trim();
+    if (!name) return;
+    const id = onCreateGroup(name);
+    setNewGroupName("");
+    setShowNewGroupInput(false);
+    if (selectedIds.size > 0) {
+      assignSelectedToGroup(id);
+    } else {
+      setActiveTab(id);
     }
   }
 
@@ -1109,15 +1268,120 @@ function PhotoPicker({ title, subtitle, library, onPickLibrary, onCameraShot, on
       {library.length > 0 && (
         <>
           <div style={styles.sectionDivider}>
-            <span style={styles.sectionDividerLabel}>アップロード済みの写真から選ぶ</span>
+            <span style={styles.sectionDividerLabel}>アップロード済みの写真から選ぶ（番号付き）</span>
+            <button
+              style={styles.organizeToggleBtn}
+              onClick={() => {
+                setOrganizing((o) => !o);
+                setSelectedIds(new Set());
+              }}
+            >
+              {organizing ? "完了" : "整理する"}
+            </button>
           </div>
-          <div style={styles.libraryGrid}>
-            {library.map((p) => (
-              <div key={p.id} style={styles.libraryThumb} onClick={() => onPickLibrary(p)}>
-                <img src={p.src} alt="" style={styles.libraryThumbImg} />
-              </div>
+
+          {/* グループタブ */}
+          <div style={styles.groupTabRow}>
+            <button
+              style={{ ...styles.groupTab, ...(activeTab === "all" ? styles.groupTabActive : {}) }}
+              onClick={() => setActiveTab("all")}
+            >
+              すべて（{library.length}）
+            </button>
+            <button
+              style={{ ...styles.groupTab, ...(activeTab === "unsorted" ? styles.groupTabActive : {}) }}
+              onClick={() => setActiveTab("unsorted")}
+            >
+              未分類（{library.filter((p) => !p.groupId).length}）
+            </button>
+            {photoGroups.map((g) => (
+              <span key={g.id} style={styles.groupTabWithDelete}>
+                <button
+                  style={{ ...styles.groupTab, ...(activeTab === g.id ? styles.groupTabActive : {}) }}
+                  onClick={() => setActiveTab(g.id)}
+                >
+                  {g.name}（{library.filter((p) => p.groupId === g.id).length}）
+                </button>
+                {organizing && onDeleteGroup && (
+                  <button
+                    style={styles.groupTabDeleteBtn}
+                    onClick={() => {
+                      if (activeTab === g.id) setActiveTab("all");
+                      onDeleteGroup(g.id);
+                    }}
+                    title="グループを削除（写真は未分類に戻ります）"
+                  >
+                    ×
+                  </button>
+                )}
+              </span>
             ))}
+            {!showNewGroupInput ? (
+              <button style={styles.groupTabAdd} onClick={() => setShowNewGroupInput(true)}>
+                ＋ グループ作成
+              </button>
+            ) : (
+              <span style={styles.groupNewInputWrap}>
+                <input
+                  style={styles.groupNewInput}
+                  value={newGroupName}
+                  placeholder="例：問題文、答え"
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  autoFocus
+                  onKeyDown={(e) => e.key === "Enter" && handleCreateGroup()}
+                />
+                <button style={styles.groupNewInputOk} disabled={!newGroupName.trim()} onClick={handleCreateGroup}>
+                  作成
+                </button>
+              </span>
+            )}
           </div>
+
+          {organizing && (
+            <p style={styles.helperTextSmall}>
+              写真をタップして選び、下のグループに割り当ててください（{selectedIds.size}枚選択中）
+            </p>
+          )}
+
+          <div style={styles.libraryGrid}>
+            {visibleList.map((p) => {
+              const isSelected = selectedIds.has(p.id);
+              return (
+                <div
+                  key={p.id}
+                  style={{
+                    ...styles.libraryThumb,
+                    ...(organizing && isSelected ? styles.libraryThumbSelected : {}),
+                  }}
+                  onClick={() => (organizing ? toggleSelect(p.id) : onPickLibrary(p))}
+                >
+                  <img src={p.src} alt="" style={styles.libraryThumbImg} />
+                  <span style={styles.libraryThumbNumber}>{p.number}</span>
+                  {organizing && (
+                    <span style={{ ...styles.libraryThumbCheck, ...(isSelected ? styles.libraryThumbCheckOn : {}) }}>
+                      {isSelected ? "✓" : ""}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {organizing && selectedIds.size > 0 && (
+            <div style={styles.assignBar}>
+              <span style={styles.assignBarLabel}>このグループに入れる：</span>
+              <div style={styles.assignBarBtns}>
+                <button style={styles.assignBarBtn} onClick={() => assignSelectedToGroup(null)}>
+                  未分類に戻す
+                </button>
+                {photoGroups.map((g) => (
+                  <button key={g.id} style={styles.assignBarBtn} onClick={() => assignSelectedToGroup(g.id)}>
+                    {g.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </>
       )}
 
@@ -1140,21 +1404,96 @@ function PhotoPicker({ title, subtitle, library, onPickLibrary, onCameraShot, on
 // ---------- 矩形トリミングコンポーネント ----------
 function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }) {
   const containerRef = useRef(null);
+  const scrollWrapRef = useRef(null);
   const [rect, setRect] = useState(null);
+  const [freePath, setFreePath] = useState(null); // フリーハンドモードの軌跡 [{x,y}, ...]
   const dragStartRef = useRef(null);
+  const drawingRef = useRef(false);
   const [displaySize, setDisplaySize] = useState({ w: 0, h: 0 });
+  const [mode, setMode] = useState("rect"); // "rect" | "free"
+  const [zoom, setZoom] = useState(1);
+  const pinchStateRef = useRef(null); // ピンチズーム用の初期距離・倍率
 
   useEffect(() => {
     function measure() {
       if (containerRef.current) {
         const r = containerRef.current.getBoundingClientRect();
-        setDisplaySize({ w: r.width, h: r.height });
+        // ズーム倍率を除いた「等倍時のサイズ」を基準に座標変換するため zoom で割って保持する
+        setDisplaySize({ w: r.width / zoom, h: r.height / zoom });
       }
     }
     measure();
     window.addEventListener("resize", measure);
     return () => window.removeEventListener("resize", measure);
-  }, []);
+  }, [zoom]);
+
+  function clampZoom(z) {
+    return Math.min(4, Math.max(1, z));
+  }
+
+  function changeZoom(nextZoom) {
+    setZoom(clampZoom(nextZoom));
+  }
+
+  // ピンチズーム＆2本指パン。1本指は範囲選択用ドラッグに専有させるため、
+  // 「写真の位置を動かす」操作は2本指ジェスチャーに割り当てる
+  // （一般的な画像編集アプリのピンチ操作に近い感覚）。
+  useEffect(() => {
+    const wrap = scrollWrapRef.current;
+    if (!wrap) return;
+
+    function distanceOf(touches) {
+      const dx = touches[0].clientX - touches[1].clientX;
+      const dy = touches[0].clientY - touches[1].clientY;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+    function centerOf(touches) {
+      return {
+        x: (touches[0].clientX + touches[1].clientX) / 2,
+        y: (touches[0].clientY + touches[1].clientY) / 2,
+      };
+    }
+
+    function handleTouchStart(e) {
+      if (e.touches.length === 2) {
+        pinchStateRef.current = {
+          startDist: distanceOf(e.touches),
+          startZoom: zoom,
+          startCenter: centerOf(e.touches),
+          startScrollLeft: wrap.scrollLeft,
+          startScrollTop: wrap.scrollTop,
+        };
+      }
+    }
+    function handleTouchMove(e) {
+      if (e.touches.length === 2 && pinchStateRef.current) {
+        e.preventDefault();
+        const { startDist, startZoom, startCenter, startScrollLeft, startScrollTop } = pinchStateRef.current;
+        const dist = distanceOf(e.touches);
+        const scale = dist / startDist;
+        changeZoom(startZoom * scale);
+
+        const center = centerOf(e.touches);
+        wrap.scrollLeft = startScrollLeft - (center.x - startCenter.x);
+        wrap.scrollTop = startScrollTop - (center.y - startCenter.y);
+      }
+    }
+    function handleTouchEnd(e) {
+      if (e.touches.length < 2) pinchStateRef.current = null;
+    }
+
+    wrap.addEventListener("touchstart", handleTouchStart, { passive: false });
+    wrap.addEventListener("touchmove", handleTouchMove, { passive: false });
+    wrap.addEventListener("touchend", handleTouchEnd);
+    wrap.addEventListener("touchcancel", handleTouchEnd);
+    return () => {
+      wrap.removeEventListener("touchstart", handleTouchStart);
+      wrap.removeEventListener("touchmove", handleTouchMove);
+      wrap.removeEventListener("touchend", handleTouchEnd);
+      wrap.removeEventListener("touchcancel", handleTouchEnd);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoom]);
 
   // ドラッグでの範囲選択中、iOS Safari等がページのスクロールや
   // 画像の長押しコンテキストメニュー（保存・コピー等）を発動させてしまい、
@@ -1170,28 +1509,42 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
       const touch = e.touches && e.touches[0];
       const clientX = touch ? touch.clientX : e.clientX;
       const clientY = touch ? touch.clientY : e.clientY;
-      return { x: clientX - r.left, y: clientY - r.top };
+      // 表示座標を「zoom=1相当」の座標に正規化してから扱う
+      return { x: (clientX - r.left) / zoom, y: (clientY - r.top) / zoom };
     }
 
     function handleDown(e) {
+      if (e.touches && e.touches.length > 1) return; // 2本指はピンチズーム用なので範囲選択には使わない
       e.preventDefault();
       const p = getPos(e);
-      dragStartRef.current = p;
-      setRect({ x: p.x, y: p.y, w: 0, h: 0 });
+      drawingRef.current = true;
+      if (mode === "rect") {
+        dragStartRef.current = p;
+        setRect({ x: p.x, y: p.y, w: 0, h: 0 });
+      } else {
+        setFreePath([p]);
+      }
     }
     function handleMove(e) {
-      if (!dragStartRef.current) return;
+      if (!drawingRef.current) return;
+      if (e.touches && e.touches.length > 1) return;
       e.preventDefault();
       const p = getPos(e);
-      const start = dragStartRef.current;
-      const x = Math.min(start.x, p.x);
-      const y = Math.min(start.y, p.y);
-      const w = Math.abs(p.x - start.x);
-      const h = Math.abs(p.y - start.y);
-      setRect({ x, y, w, h });
+      if (mode === "rect") {
+        if (!dragStartRef.current) return;
+        const start = dragStartRef.current;
+        const x = Math.min(start.x, p.x);
+        const y = Math.min(start.y, p.y);
+        const w = Math.abs(p.x - start.x);
+        const h = Math.abs(p.y - start.y);
+        setRect({ x, y, w, h });
+      } else {
+        setFreePath((prev) => (prev ? [...prev, p] : [p]));
+      }
     }
     function handleUp(e) {
-      e.preventDefault();
+      if (e.cancelable) e.preventDefault();
+      drawingRef.current = false;
       dragStartRef.current = null;
     }
 
@@ -1212,49 +1565,113 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
       window.removeEventListener("mousemove", handleMove);
       window.removeEventListener("mouseup", handleUp);
     };
-  }, []);
+  }, [mode, zoom]);
+
+  function switchMode(nextMode) {
+    setMode(nextMode);
+    setRect(null);
+    setFreePath(null);
+  }
 
   async function confirm() {
-    if (!rect || rect.w < 10 || rect.h < 10) return;
     const scaleX = photo.width / displaySize.w;
     const scaleY = photo.height / displaySize.h;
-    const realRect = {
-      x: rect.x * scaleX,
-      y: rect.y * scaleY,
-      w: rect.w * scaleX,
-      h: rect.h * scaleY,
-    };
-    const cropped = await cropImage(photo.src, realRect);
-    onConfirm(cropped);
-    setRect(null);
+
+    if (mode === "rect") {
+      if (!rect || rect.w < 10 || rect.h < 10) return;
+      const realRect = {
+        x: rect.x * scaleX,
+        y: rect.y * scaleY,
+        w: rect.w * scaleX,
+        h: rect.h * scaleY,
+      };
+      const cropped = await cropImage(photo.src, realRect);
+      onConfirm(cropped);
+      setRect(null);
+    } else {
+      if (!freePath || freePath.length < 3) return;
+      const realPath = freePath.map((p) => ({ x: p.x * scaleX, y: p.y * scaleY }));
+      const cropped = await cropImageFreeform(photo.src, realPath);
+      onConfirm(cropped);
+      setFreePath(null);
+    }
   }
+
+  const hasSelection = mode === "rect" ? !!rect && rect.w >= 10 : !!freePath && freePath.length >= 3;
 
   return (
     <div style={styles.cropperWrap}>
       <p style={styles.instruction}>{instruction}</p>
-      <div ref={containerRef} style={styles.cropperImgWrap}>
-        <img src={photo.src} alt="原本" style={styles.cropperImg} draggable={false} />
-        {rect && (
-          <div
-            style={{
-              position: "absolute",
-              left: rect.x,
-              top: rect.y,
-              width: rect.w,
-              height: rect.h,
-              border: "2px solid #B5482F",
-              background: "rgba(181,72,47,0.10)",
-              boxShadow: "0 0 0 9999px rgba(28,24,20,0.4)",
-              pointerEvents: "none",
-            }}
-          />
-        )}
+
+      <div style={styles.cropModeRow}>
+        <button
+          style={{ ...styles.cropModeBtn, ...(mode === "rect" ? styles.cropModeBtnActive : {}) }}
+          onClick={() => switchMode("rect")}
+        >
+          ⬜ 四角で囲む
+        </button>
+        <button
+          style={{ ...styles.cropModeBtn, ...(mode === "free" ? styles.cropModeBtnActive : {}) }}
+          onClick={() => switchMode("free")}
+        >
+          ✏️ 自由に囲む
+        </button>
+        <div style={styles.zoomControls}>
+          <button style={styles.zoomBtn} onClick={() => changeZoom(zoom - 0.5)} disabled={zoom <= 1}>
+            −
+          </button>
+          <span style={styles.zoomLabel}>{Math.round(zoom * 100)}%</span>
+          <button style={styles.zoomBtn} onClick={() => changeZoom(zoom + 0.5)} disabled={zoom >= 4}>
+            ＋
+          </button>
+        </div>
       </div>
+      {zoom > 1 && <p style={styles.helperTextSmall}>2本指で操作すると拡大したまま位置を動かせます（1本指は範囲選択用）</p>}
+
+      <div ref={scrollWrapRef} style={styles.cropperScrollWrap}>
+        <div
+          ref={containerRef}
+          style={{
+            ...styles.cropperImgWrap,
+            width: `${zoom * 100}%`,
+            touchAction: "none",
+          }}
+        >
+          <img src={photo.src} alt="原本" style={styles.cropperImg} draggable={false} />
+          {mode === "rect" && rect && (
+            <div
+              style={{
+                position: "absolute",
+                left: rect.x * zoom,
+                top: rect.y * zoom,
+                width: rect.w * zoom,
+                height: rect.h * zoom,
+                border: "2px solid #B5482F",
+                background: "rgba(181,72,47,0.10)",
+                boxShadow: "0 0 0 9999px rgba(28,24,20,0.4)",
+                pointerEvents: "none",
+              }}
+            />
+          )}
+          {mode === "free" && freePath && freePath.length > 1 && (
+            <svg style={styles.freeSvgOverlay} width="100%" height="100%">
+              <polygon
+                points={freePath.map((p) => `${p.x * zoom},${p.y * zoom}`).join(" ")}
+                fill="rgba(181,72,47,0.18)"
+                stroke="#B5482F"
+                strokeWidth="2.5"
+                strokeLinejoin="round"
+              />
+            </svg>
+          )}
+        </div>
+      </div>
+
       <div style={styles.rowButtons}>
         <button style={styles.linkBtn} onClick={onBackToPicker}>
           ← 別の写真を選ぶ
         </button>
-        <button style={styles.primaryBtnFlex} disabled={!rect || rect.w < 10} onClick={confirm}>
+        <button style={styles.primaryBtnFlex} disabled={!hasSelection} onClick={confirm}>
           {confirmLabel}
         </button>
       </div>
@@ -1344,7 +1761,18 @@ function CardThumb({ src, text }) {
 }
 
 // ---------- カード編集画面 ----------
-function EditCardScreen({ card, library, onAddPhoto, onBack, onUpdate, onDelete }) {
+function EditCardScreen({
+  card,
+  library,
+  onAddPhoto,
+  onBack,
+  onUpdate,
+  onDelete,
+  photoGroups = [],
+  onCreateGroup,
+  onSetPhotoGroup,
+  onDeleteGroup,
+}) {
   // null: 表示モード, "front"/"back": その面を編集中
   const [editingSide, setEditingSide] = useState(null);
   const [editSubStep, setEditSubStep] = useState("pick"); // pick | crop
@@ -1397,6 +1825,7 @@ function EditCardScreen({ card, library, onAddPhoto, onBack, onUpdate, onDelete 
           <PhotoPicker
             title={`${sideLabel} の内容を選ぶ`}
             library={library}
+            photoGroups={photoGroups}
             onPickLibrary={(p) => {
               setActivePhoto(p);
               setEditSubStep("crop");
@@ -1410,17 +1839,20 @@ function EditCardScreen({ card, library, onAddPhoto, onBack, onUpdate, onDelete 
               setEditSubStep("crop");
               e.target.value = "";
             }}
-            onUploadFiles={async (e) => {
+            onUploadFiles={async (e, groupId) => {
               const files = Array.from(e.target.files || []);
               if (files.length === 0) return;
               for (const file of files) {
                 const img = await loadAndResizeImage(file);
-                onAddPhoto(img);
+                onAddPhoto(img, groupId || null);
               }
               e.target.value = "";
             }}
             onUseText={(text) => applyText(editingSide, text)}
             onSkip={editingSide === "back" ? clearBack : undefined}
+            onCreateGroup={onCreateGroup}
+            onSetPhotoGroup={onSetPhotoGroup}
+            onDeleteGroup={onDeleteGroup}
           />
         )}
 
@@ -1894,27 +2326,198 @@ const styles = {
     gap: 8,
   },
   libraryThumb: {
+    position: "relative",
     aspectRatio: "1 / 1",
     borderRadius: 10,
     overflow: "hidden",
     border: `1px solid ${HAIRLINE}`,
     background: CARD_BG,
   },
+  libraryThumbSelected: { borderColor: STAMP, borderWidth: 2, boxShadow: "0 0 0 2px rgba(181,72,47,0.15)" },
   libraryThumbImg: { width: "100%", height: "100%", objectFit: "cover", display: "block" },
+  libraryThumbNumber: {
+    position: "absolute",
+    top: 4,
+    left: 4,
+    minWidth: 18,
+    height: 18,
+    padding: "0 4px",
+    borderRadius: 9,
+    background: "rgba(28,24,20,0.62)",
+    color: "#FBF3EC",
+    fontSize: 10.5,
+    fontWeight: 700,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    lineHeight: 1,
+  },
+  libraryThumbCheck: {
+    position: "absolute",
+    top: 4,
+    right: 4,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    background: "rgba(251,248,240,0.85)",
+    border: `1.5px solid ${HAIRLINE}`,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: 11,
+    fontWeight: 700,
+    color: STAMP,
+  },
+  libraryThumbCheckOn: { background: STAMP, borderColor: STAMP, color: "#FBF3EC" },
+
+  // 写真グループのタブ・整理UI
+  organizeToggleBtn: {
+    background: "none",
+    border: "none",
+    color: STAMP,
+    fontSize: 12,
+    fontWeight: 700,
+    padding: 0,
+    marginLeft: "auto",
+  },
+  groupTabRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 6,
+    marginBottom: 10,
+  },
+  groupTab: {
+    background: CARD_BG,
+    border: `1px solid ${HAIRLINE}`,
+    borderRadius: 999,
+    padding: "5px 11px",
+    fontSize: 11.5,
+    fontWeight: 700,
+    color: MUTED,
+  },
+  groupTabActive: { background: STAMP, borderColor: STAMP, color: "#FBF3EC" },
+  groupTabWithDelete: { position: "relative", display: "inline-flex" },
+  groupTabDeleteBtn: {
+    position: "absolute",
+    top: -6,
+    right: -6,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    background: "#9A3A26",
+    color: "#FBF3EC",
+    border: "none",
+    fontSize: 10,
+    fontWeight: 700,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 0,
+    lineHeight: 1,
+  },
+  groupTabAdd: {
+    background: "none",
+    border: `1px dashed ${HAIRLINE}`,
+    borderRadius: 999,
+    padding: "5px 11px",
+    fontSize: 11.5,
+    fontWeight: 700,
+    color: STAMP,
+  },
+  groupNewInputWrap: { display: "flex", gap: 6, alignItems: "center" },
+  groupNewInput: {
+    border: `1px solid ${HAIRLINE}`,
+    borderRadius: 999,
+    padding: "5px 11px",
+    fontSize: 11.5,
+    background: CARD_BG,
+    width: 110,
+  },
+  groupNewInputOk: {
+    background: STAMP,
+    color: "#FBF3EC",
+    border: "none",
+    borderRadius: 999,
+    padding: "5px 11px",
+    fontSize: 11.5,
+    fontWeight: 700,
+  },
+  assignBar: {
+    background: "#FCF4EE",
+    border: "1px solid #E4B7A6",
+    borderRadius: 12,
+    padding: "10px 12px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  },
+  assignBarLabel: { fontSize: 12, fontWeight: 700, color: "#9A3A26" },
+  assignBarBtns: { display: "flex", flexWrap: "wrap", gap: 6 },
+  assignBarBtn: {
+    background: CARD_BG,
+    border: `1px solid ${HAIRLINE}`,
+    borderRadius: 999,
+    padding: "6px 12px",
+    fontSize: 12,
+    fontWeight: 600,
+    color: INK,
+  },
 
   cropperWrap: { display: "flex", flexDirection: "column", gap: 14 },
   instruction: { fontSize: 14, color: "#5A5347", margin: 0, fontWeight: 600 },
+  cropModeRow: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  cropModeBtn: {
+    background: CARD_BG,
+    border: `1px solid ${HAIRLINE}`,
+    borderRadius: 10,
+    padding: "8px 12px",
+    fontSize: 12.5,
+    fontWeight: 700,
+    color: MUTED,
+  },
+  cropModeBtnActive: { background: STAMP, borderColor: STAMP, color: "#FBF3EC" },
+  zoomControls: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    marginLeft: "auto",
+    background: CARD_BG,
+    border: `1px solid ${HAIRLINE}`,
+    borderRadius: 10,
+    padding: "4px 6px",
+  },
+  zoomBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 7,
+    border: "none",
+    background: PAPER,
+    color: STAMP,
+    fontSize: 15,
+    fontWeight: 700,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 0,
+  },
+  zoomLabel: { fontSize: 11.5, fontWeight: 700, color: MUTED, minWidth: 34, textAlign: "center" },
+  cropperScrollWrap: {
+    position: "relative",
+    width: "100%",
+    maxHeight: "60vh",
+    overflow: "auto",
+    borderRadius: 12,
+    border: `1px solid ${HAIRLINE}`,
+    background: "#0000",
+  },
   cropperImgWrap: {
     position: "relative",
     width: "100%",
-    borderRadius: 12,
-    overflow: "hidden",
-    border: `1px solid ${HAIRLINE}`,
-    touchAction: "none",
     userSelect: "none",
     WebkitTouchCallout: "none",
   },
   cropperImg: { width: "100%", display: "block", userSelect: "none", WebkitTouchCallout: "none", WebkitUserSelect: "none" },
+  freeSvgOverlay: { position: "absolute", inset: 0, pointerEvents: "none" },
   rowButtons: { display: "flex", gap: 10, alignItems: "center" },
   confirmBox: { display: "flex", flexDirection: "column", gap: 14 },
   sectionLabel: { fontSize: 13, fontWeight: 700, color: "#5A5347", margin: "8px 0 0" },
@@ -1926,7 +2529,7 @@ const styles = {
     padding: 8,
     position: "relative",
   },
-  pendingImg: { width: "100%", borderRadius: 8, display: "block" },
+  pendingImg: { width: "100%", borderRadius: 8, display: "block", background: PAPER },
   pendingCard: {
     background: CARD_BG,
     border: `1px solid ${HAIRLINE}`,
