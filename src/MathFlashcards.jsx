@@ -248,6 +248,10 @@ export default function MathFlashcards() {
   const [studyQueue, setStudyQueue] = useState(null); // {cardIds, mode}
   const [photoLibrary, setPhotoLibrary] = useState([]); // {id, src, width, height, addedAt, groupId}
   const [photoGroups, setPhotoGroups] = useState([]); // {id, name}
+  // 写真ライブラリの「どのグループを表示中か」はApp全体で1つだけ持つ。
+  // PhotoPicker（表/裏それぞれで別インスタンスになる）の中でstateとして
+  // 持つと、表→裏と画面が切り替わるたびに選択がリセットされてしまうため。
+  const [activePhotoTab, setActivePhotoTab] = useState("all"); // "all" | "unsorted" | groupId
   const [loading, setLoading] = useState(true);
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved | error
   const [saveErrorDetail, setSaveErrorDetail] = useState(null);
@@ -484,6 +488,8 @@ export default function MathFlashcards() {
           onCreateGroup={createPhotoGroup}
           onSetPhotoGroup={setPhotoGroup}
           onDeleteGroup={deletePhotoGroup}
+          activePhotoTab={activePhotoTab}
+          onChangeActivePhotoTab={setActivePhotoTab}
           onCancel={() => setScreen("home")}
           onCreate={(name, newCards) => {
             const id = createDeck(name);
@@ -522,6 +528,8 @@ export default function MathFlashcards() {
           onCreateGroup={createPhotoGroup}
           onSetPhotoGroup={setPhotoGroup}
           onDeleteGroup={deletePhotoGroup}
+          activePhotoTab={activePhotoTab}
+          onChangeActivePhotoTab={setActivePhotoTab}
           onBack={() => setScreen("deck")}
           onUpdate={(patch) => updateCard(activeCardId, patch)}
           onDelete={() => {
@@ -541,6 +549,8 @@ export default function MathFlashcards() {
           onCreateGroup={createPhotoGroup}
           onSetPhotoGroup={setPhotoGroup}
           onDeleteGroup={deletePhotoGroup}
+          activePhotoTab={activePhotoTab}
+          onChangeActivePhotoTab={setActivePhotoTab}
           deckName={decks.find((d) => d.id === activeDeckId)?.name}
           onCancel={() => setScreen("deck")}
           onCreate={(_, newCards) => {
@@ -896,6 +906,8 @@ function CaptureScreen({
   onCreateGroup,
   onSetPhotoGroup,
   onDeleteGroup,
+  activePhotoTab,
+  onChangeActivePhotoTab,
 }) {
   // upload-or-pick(front/back) → crop(front/back) → more-or-back → name
   // step は履歴スタックとして保持し、「戻る」で1つ前のステップに戻れるようにする
@@ -923,7 +935,8 @@ function CaptureScreen({
     const file = e.target.files?.[0];
     if (!file) return;
     const img = await loadAndResizeImage(file);
-    const entry = onAddPhoto(img);
+    const groupId = activePhotoTab !== "all" && activePhotoTab !== "unsorted" ? activePhotoTab : null;
+    const entry = onAddPhoto(img, groupId);
     setActivePhoto(entry);
     goTo(nextStep);
     e.target.value = "";
@@ -1004,6 +1017,8 @@ function CaptureScreen({
           onCreateGroup={onCreateGroup}
           onSetPhotoGroup={onSetPhotoGroup}
           onDeleteGroup={onDeleteGroup}
+          activeTab={activePhotoTab}
+          onChangeActiveTab={onChangeActivePhotoTab}
         />
       )}
 
@@ -1031,6 +1046,8 @@ function CaptureScreen({
           onCreateGroup={onCreateGroup}
           onSetPhotoGroup={onSetPhotoGroup}
           onDeleteGroup={onDeleteGroup}
+          activeTab={activePhotoTab}
+          onChangeActiveTab={onChangeActivePhotoTab}
         />
       )}
 
@@ -1143,13 +1160,14 @@ function PhotoPicker({
   onCreateGroup,
   onSetPhotoGroup,
   onDeleteGroup,
+  activeTab,
+  onChangeActiveTab,
 }) {
   const cameraRef = useRef(null);
   const uploadRef = useRef(null);
   const [textMode, setTextMode] = useState(false);
   const [textValue, setTextValue] = useState("");
   const [uploading, setUploading] = useState(false);
-  const [activeTab, setActiveTab] = useState("all"); // "all" | "unsorted" | groupId
   const [organizing, setOrganizing] = useState(false); // グループ整理モード
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [newGroupName, setNewGroupName] = useState("");
@@ -1159,7 +1177,6 @@ function PhotoPicker({
   const numbered = [...library]
     .sort((a, b) => a.addedAt - b.addedAt)
     .map((p, i) => ({ ...p, number: i + 1 }));
-  const numberById = new Map(numbered.map((p) => [p.id, p.number]));
 
   // 表示用：最新が上に来るよう新しい順、ただし番号は上の固定値を使う
   const displayList = [...numbered].sort((a, b) => b.addedAt - a.addedAt);
@@ -1203,7 +1220,7 @@ function PhotoPicker({
     if (selectedIds.size > 0) {
       assignSelectedToGroup(id);
     } else {
-      setActiveTab(id);
+      onChangeActiveTab(id);
     }
   }
 
@@ -1284,13 +1301,13 @@ function PhotoPicker({
           <div style={styles.groupTabRow}>
             <button
               style={{ ...styles.groupTab, ...(activeTab === "all" ? styles.groupTabActive : {}) }}
-              onClick={() => setActiveTab("all")}
+              onClick={() => onChangeActiveTab("all")}
             >
               すべて（{library.length}）
             </button>
             <button
               style={{ ...styles.groupTab, ...(activeTab === "unsorted" ? styles.groupTabActive : {}) }}
-              onClick={() => setActiveTab("unsorted")}
+              onClick={() => onChangeActiveTab("unsorted")}
             >
               未分類（{library.filter((p) => !p.groupId).length}）
             </button>
@@ -1298,7 +1315,7 @@ function PhotoPicker({
               <span key={g.id} style={styles.groupTabWithDelete}>
                 <button
                   style={{ ...styles.groupTab, ...(activeTab === g.id ? styles.groupTabActive : {}) }}
-                  onClick={() => setActiveTab(g.id)}
+                  onClick={() => onChangeActiveTab(g.id)}
                 >
                   {g.name}（{library.filter((p) => p.groupId === g.id).length}）
                 </button>
@@ -1306,7 +1323,7 @@ function PhotoPicker({
                   <button
                     style={styles.groupTabDeleteBtn}
                     onClick={() => {
-                      if (activeTab === g.id) setActiveTab("all");
+                      if (activeTab === g.id) onChangeActiveTab("all");
                       onDeleteGroup(g.id);
                     }}
                     title="グループを削除（写真は未分類に戻ります）"
@@ -1409,10 +1426,11 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
   const [freePath, setFreePath] = useState(null); // フリーハンドモードの軌跡 [{x,y}, ...]
   const dragStartRef = useRef(null);
   const drawingRef = useRef(false);
+  const panStartRef = useRef(null);
   const [displaySize, setDisplaySize] = useState({ w: 0, h: 0 });
-  const [mode, setMode] = useState("rect"); // "rect" | "free"
+  const [shapeMode, setShapeMode] = useState("rect"); // "rect" | "free"（切り取りの形）
+  const [interactionMode, setInteractionMode] = useState("draw"); // "draw"（範囲を選ぶ） | "move"（拡大して位置を動かす）
   const [zoom, setZoom] = useState(1);
-  const pinchStateRef = useRef(null); // ピンチズーム用の初期距離・倍率
 
   useEffect(() => {
     function measure() {
@@ -1433,92 +1451,44 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
 
   function changeZoom(nextZoom) {
     setZoom(clampZoom(nextZoom));
+    // 1倍に戻したら自動的に「範囲を選ぶ」操作に戻す（移動する必要がなくなるため）
+    if (nextZoom <= 1) setInteractionMode("draw");
   }
 
-  // ピンチズーム＆2本指パン。1本指は範囲選択用ドラッグに専有させるため、
-  // 「写真の位置を動かす」操作は2本指ジェスチャーに割り当てる
-  // （一般的な画像編集アプリのピンチ操作に近い感覚）。
-  useEffect(() => {
-    const wrap = scrollWrapRef.current;
-    if (!wrap) return;
-
-    function distanceOf(touches) {
-      const dx = touches[0].clientX - touches[1].clientX;
-      const dy = touches[0].clientY - touches[1].clientY;
-      return Math.sqrt(dx * dx + dy * dy);
-    }
-    function centerOf(touches) {
-      return {
-        x: (touches[0].clientX + touches[1].clientX) / 2,
-        y: (touches[0].clientY + touches[1].clientY) / 2,
-      };
-    }
-
-    function handleTouchStart(e) {
-      if (e.touches.length === 2) {
-        pinchStateRef.current = {
-          startDist: distanceOf(e.touches),
-          startZoom: zoom,
-          startCenter: centerOf(e.touches),
-          startScrollLeft: wrap.scrollLeft,
-          startScrollTop: wrap.scrollTop,
-        };
-      }
-    }
-    function handleTouchMove(e) {
-      if (e.touches.length === 2 && pinchStateRef.current) {
-        e.preventDefault();
-        const { startDist, startZoom, startCenter, startScrollLeft, startScrollTop } = pinchStateRef.current;
-        const dist = distanceOf(e.touches);
-        const scale = dist / startDist;
-        changeZoom(startZoom * scale);
-
-        const center = centerOf(e.touches);
-        wrap.scrollLeft = startScrollLeft - (center.x - startCenter.x);
-        wrap.scrollTop = startScrollTop - (center.y - startCenter.y);
-      }
-    }
-    function handleTouchEnd(e) {
-      if (e.touches.length < 2) pinchStateRef.current = null;
-    }
-
-    wrap.addEventListener("touchstart", handleTouchStart, { passive: false });
-    wrap.addEventListener("touchmove", handleTouchMove, { passive: false });
-    wrap.addEventListener("touchend", handleTouchEnd);
-    wrap.addEventListener("touchcancel", handleTouchEnd);
-    return () => {
-      wrap.removeEventListener("touchstart", handleTouchStart);
-      wrap.removeEventListener("touchmove", handleTouchMove);
-      wrap.removeEventListener("touchend", handleTouchEnd);
-      wrap.removeEventListener("touchcancel", handleTouchEnd);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [zoom]);
-
-  // ドラッグでの範囲選択中、iOS Safari等がページのスクロールや
-  // 画像の長押しコンテキストメニュー（保存・コピー等）を発動させてしまい、
-  // 選択範囲が大きく崩れることがある。React の合成タッチイベントは
-  // ブラウザによって passive 指定され preventDefault が効かない場合があるため、
-  // ネイティブの addEventListener で { passive: false } を明示して確実に止める。
+  // interactionMode === "move" のときは1本指ドラッグで画像を動かす（スクロール）。
+  // interactionMode === "draw" のときは1本指ドラッグで範囲（四角 or 自由形）を描く。
+  // 2本指ジェスチャーは使わず、明示的なボタンでモードを切り替える方式にすることで、
+  // タッチ操作の精度に左右されにくくしている。
   useEffect(() => {
     const el = containerRef.current;
-    if (!el) return;
+    const wrap = scrollWrapRef.current;
+    if (!el || !wrap) return;
+
+    function getClientPos(e) {
+      const touch = e.touches && e.touches[0];
+      return { clientX: touch ? touch.clientX : e.clientX, clientY: touch ? touch.clientY : e.clientY };
+    }
 
     function getPos(e) {
       const r = el.getBoundingClientRect();
-      const touch = e.touches && e.touches[0];
-      const clientX = touch ? touch.clientX : e.clientX;
-      const clientY = touch ? touch.clientY : e.clientY;
+      const { clientX, clientY } = getClientPos(e);
       // 表示座標を「zoom=1相当」の座標に正規化してから扱う
       return { x: (clientX - r.left) / zoom, y: (clientY - r.top) / zoom };
     }
 
     function handleDown(e) {
-      if (e.touches && e.touches.length > 1) return; // 2本指はピンチズーム用なので範囲選択には使わない
+      if (e.touches && e.touches.length > 1) return;
       e.preventDefault();
+
+      if (interactionMode === "move") {
+        const { clientX, clientY } = getClientPos(e);
+        panStartRef.current = { x: clientX, y: clientY, scrollLeft: wrap.scrollLeft, scrollTop: wrap.scrollTop };
+        return;
+      }
+
       const p = getPos(e);
       drawingRef.current = true;
-      if (mode === "rect") {
+      if (shapeMode === "rect") {
         dragStartRef.current = p;
         setRect({ x: p.x, y: p.y, w: 0, h: 0 });
       } else {
@@ -1526,11 +1496,23 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
       }
     }
     function handleMove(e) {
-      if (!drawingRef.current) return;
       if (e.touches && e.touches.length > 1) return;
+
+      if (interactionMode === "move") {
+        if (!panStartRef.current) return;
+        e.preventDefault();
+        const { clientX, clientY } = getClientPos(e);
+        const dx = clientX - panStartRef.current.x;
+        const dy = clientY - panStartRef.current.y;
+        wrap.scrollLeft = panStartRef.current.scrollLeft - dx;
+        wrap.scrollTop = panStartRef.current.scrollTop - dy;
+        return;
+      }
+
+      if (!drawingRef.current) return;
       e.preventDefault();
       const p = getPos(e);
-      if (mode === "rect") {
+      if (shapeMode === "rect") {
         if (!dragStartRef.current) return;
         const start = dragStartRef.current;
         const x = Math.min(start.x, p.x);
@@ -1546,6 +1528,7 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
       if (e.cancelable) e.preventDefault();
       drawingRef.current = false;
       dragStartRef.current = null;
+      panStartRef.current = null;
     }
 
     el.addEventListener("touchstart", handleDown, { passive: false });
@@ -1565,10 +1548,10 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
       window.removeEventListener("mousemove", handleMove);
       window.removeEventListener("mouseup", handleUp);
     };
-  }, [mode, zoom]);
+  }, [shapeMode, interactionMode, zoom]);
 
-  function switchMode(nextMode) {
-    setMode(nextMode);
+  function switchShapeMode(next) {
+    setShapeMode(next);
     setRect(null);
     setFreePath(null);
   }
@@ -1577,7 +1560,7 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
     const scaleX = photo.width / displaySize.w;
     const scaleY = photo.height / displaySize.h;
 
-    if (mode === "rect") {
+    if (shapeMode === "rect") {
       if (!rect || rect.w < 10 || rect.h < 10) return;
       const realRect = {
         x: rect.x * scaleX,
@@ -1597,7 +1580,7 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
     }
   }
 
-  const hasSelection = mode === "rect" ? !!rect && rect.w >= 10 : !!freePath && freePath.length >= 3;
+  const hasSelection = shapeMode === "rect" ? !!rect && rect.w >= 10 : !!freePath && freePath.length >= 3;
 
   return (
     <div style={styles.cropperWrap}>
@@ -1605,14 +1588,14 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
 
       <div style={styles.cropModeRow}>
         <button
-          style={{ ...styles.cropModeBtn, ...(mode === "rect" ? styles.cropModeBtnActive : {}) }}
-          onClick={() => switchMode("rect")}
+          style={{ ...styles.cropModeBtn, ...(shapeMode === "rect" ? styles.cropModeBtnActive : {}) }}
+          onClick={() => switchShapeMode("rect")}
         >
           ⬜ 四角で囲む
         </button>
         <button
-          style={{ ...styles.cropModeBtn, ...(mode === "free" ? styles.cropModeBtnActive : {}) }}
-          onClick={() => switchMode("free")}
+          style={{ ...styles.cropModeBtn, ...(shapeMode === "free" ? styles.cropModeBtnActive : {}) }}
+          onClick={() => switchShapeMode("free")}
         >
           ✏️ 自由に囲む
         </button>
@@ -1626,7 +1609,26 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
           </button>
         </div>
       </div>
-      {zoom > 1 && <p style={styles.helperTextSmall}>2本指で操作すると拡大したまま位置を動かせます（1本指は範囲選択用）</p>}
+
+      {zoom > 1 && (
+        <div style={styles.interactionToggleRow}>
+          <button
+            style={{ ...styles.interactionToggleBtn, ...(interactionMode === "move" ? styles.interactionToggleBtnActive : {}) }}
+            onClick={() => setInteractionMode("move")}
+          >
+            ✋ 動かす
+          </button>
+          <button
+            style={{ ...styles.interactionToggleBtn, ...(interactionMode === "draw" ? styles.interactionToggleBtnActive : {}) }}
+            onClick={() => setInteractionMode("draw")}
+          >
+            ✂️ 範囲を選ぶ
+          </button>
+          <span style={styles.helperTextInline}>
+            {interactionMode === "move" ? "ドラッグして見たい場所に動かせます" : "ドラッグして範囲を選んでください"}
+          </span>
+        </div>
+      )}
 
       <div ref={scrollWrapRef} style={styles.cropperScrollWrap}>
         <div
@@ -1635,10 +1637,11 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
             ...styles.cropperImgWrap,
             width: `${zoom * 100}%`,
             touchAction: "none",
+            cursor: interactionMode === "move" ? "grab" : "crosshair",
           }}
         >
           <img src={photo.src} alt="原本" style={styles.cropperImg} draggable={false} />
-          {mode === "rect" && rect && (
+          {shapeMode === "rect" && rect && (
             <div
               style={{
                 position: "absolute",
@@ -1653,7 +1656,7 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
               }}
             />
           )}
-          {mode === "free" && freePath && freePath.length > 1 && (
+          {shapeMode === "free" && freePath && freePath.length > 1 && (
             <svg style={styles.freeSvgOverlay} width="100%" height="100%">
               <polygon
                 points={freePath.map((p) => `${p.x * zoom},${p.y * zoom}`).join(" ")}
@@ -1772,6 +1775,8 @@ function EditCardScreen({
   onCreateGroup,
   onSetPhotoGroup,
   onDeleteGroup,
+  activePhotoTab,
+  onChangeActivePhotoTab,
 }) {
   // null: 表示モード, "front"/"back": その面を編集中
   const [editingSide, setEditingSide] = useState(null);
@@ -1834,7 +1839,8 @@ function EditCardScreen({
               const file = e.target.files?.[0];
               if (!file) return;
               const img = await loadAndResizeImage(file);
-              const entry = onAddPhoto(img);
+              const groupId = activePhotoTab !== "all" && activePhotoTab !== "unsorted" ? activePhotoTab : null;
+              const entry = onAddPhoto(img, groupId);
               setActivePhoto(entry);
               setEditSubStep("crop");
               e.target.value = "";
@@ -1853,6 +1859,8 @@ function EditCardScreen({
             onCreateGroup={onCreateGroup}
             onSetPhotoGroup={onSetPhotoGroup}
             onDeleteGroup={onDeleteGroup}
+            activeTab={activePhotoTab}
+            onChangeActiveTab={onChangeActivePhotoTab}
           />
         )}
 
@@ -2501,6 +2509,27 @@ const styles = {
     padding: 0,
   },
   zoomLabel: { fontSize: 11.5, fontWeight: 700, color: MUTED, minWidth: 34, textAlign: "center" },
+  interactionToggleRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+    background: "#FCF4EE",
+    border: "1px solid #E4B7A6",
+    borderRadius: 10,
+    padding: "8px 10px",
+  },
+  interactionToggleBtn: {
+    background: CARD_BG,
+    border: `1px solid ${HAIRLINE}`,
+    borderRadius: 8,
+    padding: "6px 11px",
+    fontSize: 12.5,
+    fontWeight: 700,
+    color: MUTED,
+  },
+  interactionToggleBtnActive: { background: STAMP, borderColor: STAMP, color: "#FBF3EC" },
+  helperTextInline: { fontSize: 11.5, color: "#9A3A26", fontWeight: 600 },
   cropperScrollWrap: {
     position: "relative",
     width: "100%",
