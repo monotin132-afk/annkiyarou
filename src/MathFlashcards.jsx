@@ -488,6 +488,7 @@ export default function MathFlashcards() {
           onCreateGroup={createPhotoGroup}
           onSetPhotoGroup={setPhotoGroup}
           onDeleteGroup={deletePhotoGroup}
+          onRenameGroup={renamePhotoGroup}
           activePhotoTab={activePhotoTab}
           onChangeActivePhotoTab={setActivePhotoTab}
           onCancel={() => setScreen("home")}
@@ -528,6 +529,7 @@ export default function MathFlashcards() {
           onCreateGroup={createPhotoGroup}
           onSetPhotoGroup={setPhotoGroup}
           onDeleteGroup={deletePhotoGroup}
+          onRenameGroup={renamePhotoGroup}
           activePhotoTab={activePhotoTab}
           onChangeActivePhotoTab={setActivePhotoTab}
           onBack={() => setScreen("deck")}
@@ -549,6 +551,7 @@ export default function MathFlashcards() {
           onCreateGroup={createPhotoGroup}
           onSetPhotoGroup={setPhotoGroup}
           onDeleteGroup={deletePhotoGroup}
+          onRenameGroup={renamePhotoGroup}
           activePhotoTab={activePhotoTab}
           onChangeActivePhotoTab={setActivePhotoTab}
           deckName={decks.find((d) => d.id === activeDeckId)?.name}
@@ -906,6 +909,7 @@ function CaptureScreen({
   onCreateGroup,
   onSetPhotoGroup,
   onDeleteGroup,
+  onRenameGroup,
   activePhotoTab,
   onChangeActivePhotoTab,
 }) {
@@ -961,7 +965,17 @@ function CaptureScreen({
   function handleFrontCropped(dataUrl) {
     setPendingCards((prev) => [
       ...prev,
-      { id: uid(), frontType: "image", frontSrc: dataUrl, frontText: null, backType: null, backSrc: null, backText: null },
+      {
+        id: uid(),
+        frontType: "image",
+        frontSrc: dataUrl,
+        frontText: null,
+        frontSourcePhotoId: activePhoto?.id || null,
+        backType: null,
+        backSrc: null,
+        backText: null,
+        backSourcePhotoId: null,
+      },
     ]);
     goTo("more-or-back");
   }
@@ -969,21 +983,39 @@ function CaptureScreen({
   function handleFrontText(text) {
     setPendingCards((prev) => [
       ...prev,
-      { id: uid(), frontType: "text", frontSrc: null, frontText: text, backType: null, backSrc: null, backText: null },
+      {
+        id: uid(),
+        frontType: "text",
+        frontSrc: null,
+        frontText: text,
+        frontSourcePhotoId: null,
+        backType: null,
+        backSrc: null,
+        backText: null,
+        backSourcePhotoId: null,
+      },
     ]);
     goTo("more-or-back");
   }
 
   function handleBackCropped(dataUrl) {
     setPendingCards((prev) =>
-      prev.map((c, i) => (i === currentCardIdx ? { ...c, backType: "image", backSrc: dataUrl, backText: null } : c))
+      prev.map((c, i) =>
+        i === currentCardIdx
+          ? { ...c, backType: "image", backSrc: dataUrl, backText: null, backSourcePhotoId: activePhoto?.id || null }
+          : c
+      )
     );
     goTo("more-or-back");
   }
 
   function handleBackText(text) {
     setPendingCards((prev) =>
-      prev.map((c, i) => (i === currentCardIdx ? { ...c, backType: "text", backSrc: null, backText: text } : c))
+      prev.map((c, i) =>
+        i === currentCardIdx
+          ? { ...c, backType: "text", backSrc: null, backText: text, backSourcePhotoId: null }
+          : c
+      )
     );
     goTo("more-or-back");
   }
@@ -1017,6 +1049,7 @@ function CaptureScreen({
           onCreateGroup={onCreateGroup}
           onSetPhotoGroup={onSetPhotoGroup}
           onDeleteGroup={onDeleteGroup}
+          onRenameGroup={onRenameGroup}
           activeTab={activePhotoTab}
           onChangeActiveTab={onChangeActivePhotoTab}
         />
@@ -1046,6 +1079,7 @@ function CaptureScreen({
           onCreateGroup={onCreateGroup}
           onSetPhotoGroup={onSetPhotoGroup}
           onDeleteGroup={onDeleteGroup}
+          onRenameGroup={onRenameGroup}
           activeTab={activePhotoTab}
           onChangeActiveTab={onChangeActivePhotoTab}
         />
@@ -1128,9 +1162,11 @@ function CaptureScreen({
                 frontType: c.frontType,
                 frontSrc: c.frontSrc,
                 frontText: c.frontText,
+                frontSourcePhotoId: c.frontSourcePhotoId || null,
                 backType: c.backType,
                 backSrc: c.backSrc,
                 backText: c.backText,
+                backSourcePhotoId: c.backSourcePhotoId || null,
                 level: 0,
                 seen: 0,
                 correct: 0,
@@ -1160,6 +1196,7 @@ function PhotoPicker({
   onCreateGroup,
   onSetPhotoGroup,
   onDeleteGroup,
+  onRenameGroup,
   activeTab,
   onChangeActiveTab,
 }) {
@@ -1172,14 +1209,21 @@ function PhotoPicker({
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [newGroupName, setNewGroupName] = useState("");
   const [showNewGroupInput, setShowNewGroupInput] = useState(false);
+  const [groupManagerOpen, setGroupManagerOpen] = useState(false);
+  const [editingGroupId, setEditingGroupId] = useState(null);
+  const [editingGroupName, setEditingGroupName] = useState("");
+  const [confirmDeleteGroupId, setConfirmDeleteGroupId] = useState(null);
+  const [sortOrder, setSortOrder] = useState("newest"); // "newest" | "oldest"
 
   // 番号はアップロード順（古い順）で固定。並び順を変えても番号がブレないようにする。
   const numbered = [...library]
     .sort((a, b) => a.addedAt - b.addedAt)
     .map((p, i) => ({ ...p, number: i + 1 }));
 
-  // 表示用：最新が上に来るよう新しい順、ただし番号は上の固定値を使う
-  const displayList = [...numbered].sort((a, b) => b.addedAt - a.addedAt);
+  // 表示順は「最近使った（アップロードした）順」「古い順」を切り替え可能。番号は上の固定値を使う。
+  const displayList = [...numbered].sort((a, b) =>
+    sortOrder === "newest" ? b.addedAt - a.addedAt : a.addedAt - b.addedAt
+  );
 
   const visibleList = displayList.filter((p) => {
     if (activeTab === "all") return true;
@@ -1222,6 +1266,27 @@ function PhotoPicker({
     } else {
       onChangeActiveTab(id);
     }
+  }
+
+  function startEditGroupName(g) {
+    setEditingGroupId(g.id);
+    setEditingGroupName(g.name);
+  }
+
+  function saveEditGroupName() {
+    const name = editingGroupName.trim();
+    if (name && editingGroupId) {
+      onRenameGroup(editingGroupId, name);
+    }
+    setEditingGroupId(null);
+    setEditingGroupName("");
+  }
+
+  function confirmDeleteGroup() {
+    if (!confirmDeleteGroupId) return;
+    if (activeTab === confirmDeleteGroupId) onChangeActiveTab("all");
+    onDeleteGroup(confirmDeleteGroupId);
+    setConfirmDeleteGroupId(null);
   }
 
   if (textMode) {
@@ -1286,16 +1351,80 @@ function PhotoPicker({
         <>
           <div style={styles.sectionDivider}>
             <span style={styles.sectionDividerLabel}>アップロード済みの写真から選ぶ（番号付き）</span>
-            <button
-              style={styles.organizeToggleBtn}
-              onClick={() => {
-                setOrganizing((o) => !o);
-                setSelectedIds(new Set());
-              }}
-            >
-              {organizing ? "完了" : "整理する"}
-            </button>
+            <span style={styles.dividerBtnGroup}>
+              {photoGroups.length > 0 && (
+                <button style={styles.organizeToggleBtn} onClick={() => setGroupManagerOpen((o) => !o)}>
+                  グループを編集
+                </button>
+              )}
+              <button
+                style={styles.organizeToggleBtn}
+                onClick={() => {
+                  setOrganizing((o) => !o);
+                  setSelectedIds(new Set());
+                }}
+              >
+                {organizing ? "完了" : "整理する"}
+              </button>
+            </span>
           </div>
+
+          {groupManagerOpen && (
+            <div style={styles.groupManagerPanel}>
+              <p style={styles.groupManagerTitle}>グループの編集</p>
+              {photoGroups.length === 0 && <p style={styles.helperTextSmall}>まだグループがありません</p>}
+              {photoGroups.map((g) => (
+                <div key={g.id} style={styles.groupManagerRow}>
+                  {editingGroupId === g.id ? (
+                    <>
+                      <input
+                        style={styles.groupNewInput}
+                        value={editingGroupName}
+                        onChange={(e) => setEditingGroupName(e.target.value)}
+                        autoFocus
+                        onKeyDown={(e) => e.key === "Enter" && saveEditGroupName()}
+                      />
+                      <button style={styles.groupNewInputOk} disabled={!editingGroupName.trim()} onClick={saveEditGroupName}>
+                        保存
+                      </button>
+                      <button style={styles.linkBtnMuted} onClick={() => setEditingGroupId(null)}>
+                        やめる
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span style={styles.groupManagerName}>
+                        {g.name}（{library.filter((p) => p.groupId === g.id).length}枚）
+                      </span>
+                      <button style={styles.groupManagerEditBtn} onClick={() => startEditGroupName(g)}>
+                        名前を変更
+                      </button>
+                      <button style={styles.groupManagerDeleteBtn} onClick={() => setConfirmDeleteGroupId(g.id)}>
+                        削除
+                      </button>
+                    </>
+                  )}
+                </div>
+              ))}
+
+              {confirmDeleteGroupId && (
+                <div style={styles.groupDeleteConfirmBox}>
+                  <p style={styles.subText}>
+                    「{photoGroups.find((g) => g.id === confirmDeleteGroupId)?.name}」を削除します。
+                    中の写真は削除されず「未分類」に戻ります。
+                  </p>
+                  <div style={styles.rowButtons}>
+                    <button style={styles.secondaryBtn} onClick={() => setConfirmDeleteGroupId(null)}>
+                      やめる
+                    </button>
+                    <button style={styles.dangerBtn} onClick={confirmDeleteGroup}>
+                      削除する
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* グループタブ */}
           <div style={styles.groupTabRow}>
@@ -1312,26 +1441,13 @@ function PhotoPicker({
               未分類（{library.filter((p) => !p.groupId).length}）
             </button>
             {photoGroups.map((g) => (
-              <span key={g.id} style={styles.groupTabWithDelete}>
-                <button
-                  style={{ ...styles.groupTab, ...(activeTab === g.id ? styles.groupTabActive : {}) }}
-                  onClick={() => onChangeActiveTab(g.id)}
-                >
-                  {g.name}（{library.filter((p) => p.groupId === g.id).length}）
-                </button>
-                {organizing && onDeleteGroup && (
-                  <button
-                    style={styles.groupTabDeleteBtn}
-                    onClick={() => {
-                      if (activeTab === g.id) onChangeActiveTab("all");
-                      onDeleteGroup(g.id);
-                    }}
-                    title="グループを削除（写真は未分類に戻ります）"
-                  >
-                    ×
-                  </button>
-                )}
-              </span>
+              <button
+                key={g.id}
+                style={{ ...styles.groupTab, ...(activeTab === g.id ? styles.groupTabActive : {}) }}
+                onClick={() => onChangeActiveTab(g.id)}
+              >
+                {g.name}（{library.filter((p) => p.groupId === g.id).length}）
+              </button>
             ))}
             {!showNewGroupInput ? (
               <button style={styles.groupTabAdd} onClick={() => setShowNewGroupInput(true)}>
@@ -1352,6 +1468,22 @@ function PhotoPicker({
                 </button>
               </span>
             )}
+          </div>
+
+          <div style={styles.sortRow}>
+            <span style={styles.helperTextSmall}>並び順：</span>
+            <button
+              style={{ ...styles.sortBtn, ...(sortOrder === "newest" ? styles.sortBtnActive : {}) }}
+              onClick={() => setSortOrder("newest")}
+            >
+              新しい順
+            </button>
+            <button
+              style={{ ...styles.sortBtn, ...(sortOrder === "oldest" ? styles.sortBtnActive : {}) }}
+              onClick={() => setSortOrder("oldest")}
+            >
+              古い順
+            </button>
           </div>
 
           {organizing && (
@@ -1775,6 +1907,7 @@ function EditCardScreen({
   onCreateGroup,
   onSetPhotoGroup,
   onDeleteGroup,
+  onRenameGroup,
   activePhotoTab,
   onChangeActivePhotoTab,
 }) {
@@ -1794,24 +1927,24 @@ function EditCardScreen({
 
   function applyImage(side, dataUrl) {
     if (side === "front") {
-      onUpdate({ frontType: "image", frontSrc: dataUrl, frontText: null });
+      onUpdate({ frontType: "image", frontSrc: dataUrl, frontText: null, frontSourcePhotoId: activePhoto?.id || null });
     } else {
-      onUpdate({ backType: "image", backSrc: dataUrl, backText: null });
+      onUpdate({ backType: "image", backSrc: dataUrl, backText: null, backSourcePhotoId: activePhoto?.id || null });
     }
     setEditingSide(null);
   }
 
   function applyText(side, text) {
     if (side === "front") {
-      onUpdate({ frontType: "text", frontSrc: null, frontText: text });
+      onUpdate({ frontType: "text", frontSrc: null, frontText: text, frontSourcePhotoId: null });
     } else {
-      onUpdate({ backType: "text", backSrc: null, backText: text });
+      onUpdate({ backType: "text", backSrc: null, backText: text, backSourcePhotoId: null });
     }
     setEditingSide(null);
   }
 
   function clearBack() {
-    onUpdate({ backType: null, backSrc: null, backText: null });
+    onUpdate({ backType: null, backSrc: null, backText: null, backSourcePhotoId: null });
     setEditingSide(null);
   }
 
@@ -1859,6 +1992,7 @@ function EditCardScreen({
             onCreateGroup={onCreateGroup}
             onSetPhotoGroup={onSetPhotoGroup}
             onDeleteGroup={onDeleteGroup}
+          onRenameGroup={onRenameGroup}
             activeTab={activePhotoTab}
             onChangeActiveTab={onChangeActivePhotoTab}
           />
@@ -1877,6 +2011,11 @@ function EditCardScreen({
     );
   }
 
+  // 元になった写真（履歴）を探す。ライブラリから消えている場合は見つからない
+  const frontSourcePhoto = card.frontSourcePhotoId ? library.find((p) => p.id === card.frontSourcePhotoId) : null;
+  const backSourcePhoto = card.backSourcePhotoId ? library.find((p) => p.id === card.backSourcePhotoId) : null;
+  const [showSourcePhoto, setShowSourcePhoto] = useState(null); // 表示中の元写真 {src, label} | null
+
   // ----- 通常の表示・編集導線 -----
   return (
     <div style={styles.screen}>
@@ -1891,11 +2030,21 @@ function EditCardScreen({
       <div style={styles.editCardFace}>
         <CardThumb src={card.frontSrc} text={card.frontText} />
       </div>
-      <button style={styles.secondaryBtnFull} onClick={() => startEdit("front")}>
-        問題文を変更する
-      </button>
+      <div style={styles.rowButtons}>
+        <button style={styles.secondaryBtn} onClick={() => startEdit("front")}>
+          問題文を変更する
+        </button>
+        {frontSourcePhoto && (
+          <button
+            style={styles.secondaryBtn}
+            onClick={() => setShowSourcePhoto({ src: frontSourcePhoto.src, label: "問題文（表）の元の写真" })}
+          >
+            元の写真を見る
+          </button>
+        )}
+      </div>
 
-      <p style={styles.sectionLabel}>答え（裏）</p>
+      <p style={{ ...styles.sectionLabel, marginTop: 22 }}>答え（裏）</p>
       <div style={styles.editCardFace}>
         {card.backType ? (
           <CardThumb src={card.backSrc} text={card.backText} />
@@ -1903,11 +2052,33 @@ function EditCardScreen({
           <p style={styles.emptyText}>まだ答えが設定されていません</p>
         )}
       </div>
-      <button style={styles.secondaryBtnFull} onClick={() => startEdit("back")}>
-        {card.backType ? "答えを変更する" : "答えを追加する"}
-      </button>
+      <div style={styles.rowButtons}>
+        <button style={styles.secondaryBtn} onClick={() => startEdit("back")}>
+          {card.backType ? "答えを変更する" : "答えを追加する"}
+        </button>
+        {backSourcePhoto && (
+          <button
+            style={styles.secondaryBtn}
+            onClick={() => setShowSourcePhoto({ src: backSourcePhoto.src, label: "答え（裏）の元の写真" })}
+          >
+            元の写真を見る
+          </button>
+        )}
+      </div>
 
-      <div style={styles.statsRow}>
+      {showSourcePhoto && (
+        <div style={styles.confirmOverlay} onClick={() => setShowSourcePhoto(null)}>
+          <div style={styles.sourcePhotoDialog} onClick={(e) => e.stopPropagation()}>
+            <p style={styles.confirmTitle}>{showSourcePhoto.label}</p>
+            <img src={showSourcePhoto.src} alt="元の写真" style={styles.sourcePhotoImg} />
+            <button style={styles.primaryBtn} onClick={() => setShowSourcePhoto(null)}>
+              閉じる
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ ...styles.statsRow, marginTop: 22 }}>
         <StatPill label="出題回数" value={card.seen} />
         <StatPill label="正解数" value={card.correct} />
       </div>
@@ -2379,6 +2550,7 @@ const styles = {
   libraryThumbCheckOn: { background: STAMP, borderColor: STAMP, color: "#FBF3EC" },
 
   // 写真グループのタブ・整理UI
+  dividerBtnGroup: { display: "flex", gap: 14, marginLeft: "auto" },
   organizeToggleBtn: {
     background: "none",
     border: "none",
@@ -2386,7 +2558,53 @@ const styles = {
     fontSize: 12,
     fontWeight: 700,
     padding: 0,
-    marginLeft: "auto",
+  },
+  groupManagerPanel: {
+    background: CARD_BG,
+    border: `1px solid ${HAIRLINE}`,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  },
+  groupManagerTitle: { fontSize: 12.5, fontWeight: 700, color: "#5A5347", margin: 0 },
+  groupManagerRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+    paddingBottom: 8,
+    borderBottom: `1px solid ${HAIRLINE}`,
+  },
+  groupManagerName: { fontSize: 13, fontWeight: 600, color: INK, flex: 1, minWidth: 90 },
+  groupManagerEditBtn: {
+    background: PAPER,
+    border: `1px solid ${HAIRLINE}`,
+    borderRadius: 8,
+    padding: "5px 10px",
+    fontSize: 11.5,
+    fontWeight: 700,
+    color: STAMP,
+  },
+  groupManagerDeleteBtn: {
+    background: "none",
+    border: "none",
+    color: "#9A3A26",
+    fontSize: 11.5,
+    fontWeight: 700,
+    padding: "5px 4px",
+    textDecoration: "underline",
+  },
+  groupDeleteConfirmBox: {
+    background: "#FCF1ED",
+    border: "1px solid #E4B7A6",
+    borderRadius: 10,
+    padding: 12,
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
   },
   groupTabRow: {
     display: "flex",
@@ -2450,6 +2668,22 @@ const styles = {
     fontSize: 11.5,
     fontWeight: 700,
   },
+  sortRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 8,
+  },
+  sortBtn: {
+    background: "none",
+    border: `1px solid ${HAIRLINE}`,
+    borderRadius: 999,
+    padding: "4px 10px",
+    fontSize: 11,
+    fontWeight: 700,
+    color: MUTED,
+  },
+  sortBtnActive: { background: PAPER, borderColor: STAMP, color: STAMP },
   assignBar: {
     background: "#FCF4EE",
     border: "1px solid #E4B7A6",
@@ -2727,6 +2961,19 @@ const styles = {
     gap: 12,
   },
   confirmTitle: { fontWeight: 700, fontSize: 16, margin: 0 },
+  sourcePhotoDialog: {
+    background: CARD_BG,
+    borderRadius: 16,
+    padding: 16,
+    maxWidth: 520,
+    width: "100%",
+    maxHeight: "85vh",
+    overflow: "auto",
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+  },
+  sourcePhotoImg: { width: "100%", borderRadius: 10, display: "block", border: `1px solid ${HAIRLINE}` },
 
   levelBar: { display: "flex", gap: 3, marginTop: 7, justifyContent: "center" },
   levelDot: { width: 12, height: 4, borderRadius: 2 },
