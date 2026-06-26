@@ -1,7 +1,12 @@
-import MathFlashcards from './MathFlashcards'
-
-function App() {
-  return <MathFlashcards />
+* {
+  box-sizing: border-box;
 }
 
-export default App
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+#root {
+  min-height: 100vh;
+}
