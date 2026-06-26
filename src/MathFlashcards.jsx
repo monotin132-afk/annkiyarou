@@ -131,17 +131,44 @@ function cropImageFreeform(srcImg, pathPoints) {
 
 // ---------- 永続化（IndexedDB、storage.js経由） ----------
 const STORAGE_META_KEY = "math-flashcards:meta:v1";
+const STORAGE_DRAFT_KEY = "math-flashcards:draft:v1";
 
-async function saveMeta(decks, cards, photoLibrary, photoGroups) {
+async function saveMeta(decks, cards, photoLibrary, photoGroups, prefs) {
   // 画像本体(frontSrc/backSrc/src)は別キーに保存するため、メタには含めない
   const cardsMeta = cards.map(({ frontSrc, backSrc, ...rest }) => rest);
   const photosMeta = photoLibrary.map(({ src, ...rest }) => rest);
-  const payload = { decks, cards: cardsMeta, photos: photosMeta, photoGroups };
+  const payload = { decks, cards: cardsMeta, photos: photosMeta, photoGroups, prefs: prefs || {} };
   try {
     await storage.set(STORAGE_META_KEY, JSON.stringify(payload));
   } catch (e) {
     console.error("メタ情報の保存に失敗しました", e);
-    throw e; // 呼び出し元に伝播させ、保存失敗がUIに正しく反映されるようにする
+    throw e;
+  }
+}
+
+// デッキ作成中のドラフト（途中保存）を保存・読み込み・削除する関数群
+async function saveDraft(draft) {
+  try {
+    await storage.set(STORAGE_DRAFT_KEY, JSON.stringify({ ...draft, savedAt: Date.now() }));
+  } catch (e) {
+    console.error("ドラフトの保存に失敗しました", e);
+  }
+}
+
+async function loadDraft() {
+  try {
+    const res = await storage.get(STORAGE_DRAFT_KEY);
+    return res ? JSON.parse(res.value) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function clearDraft() {
+  try {
+    await storage.delete(STORAGE_DRAFT_KEY);
+  } catch {
+    // 存在しない場合は無視
   }
 }
 
@@ -201,7 +228,7 @@ async function loadAll() {
   }
   if (!meta) return null;
 
-  const { decks = [], cards: cardsMeta = [], photos: photosMeta = [], photoGroups = [] } = meta;
+  const { decks = [], cards: cardsMeta = [], photos: photosMeta = [], photoGroups = [], prefs = {} } = meta;
 
   // 画像本体を並列取得
   const photoResults = await Promise.all(
@@ -235,6 +262,7 @@ async function loadAll() {
     cards: cardResults.filter((c) => c.frontType === "text" ? !!c.frontText : !!c.frontSrc),
     photoLibrary: photoResults.filter((p) => p.src),
     photoGroups,
+    prefs,
   };
 }
 
@@ -248,11 +276,14 @@ export default function MathFlashcards() {
   const [studyQueue, setStudyQueue] = useState(null); // {cardIds, mode}
   const [photoLibrary, setPhotoLibrary] = useState([]); // {id, src, width, height, addedAt, groupId}
   const [photoGroups, setPhotoGroups] = useState([]); // {id, name}
-  // 写真ライブラリの「どのグループを表示中か」はApp全体で1つだけ持つ。
+  // 写真ライブラリの「どのグループを表示中か」「並び順」はApp全体で1つだけ持つ。
   // PhotoPicker（表/裏それぞれで別インスタンスになる）の中でstateとして
   // 持つと、表→裏と画面が切り替わるたびに選択がリセットされてしまうため。
   const [activePhotoTab, setActivePhotoTab] = useState("all"); // "all" | "unsorted" | groupId
+  const [librarySortOrder, setLibrarySortOrder] = useState("newest"); // "newest" | "oldest"
   const [loading, setLoading] = useState(true);
+  const [draftToRestore, setDraftToRestore] = useState(null); // 復元候補のドラフト
+  const [restoredDraft, setRestoredDraft] = useState(null); // CaptureScreenに渡す復元済みドラフト
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved | error
   const [saveErrorDetail, setSaveErrorDetail] = useState(null);
   const [consecutiveSaveFailures, setConsecutiveSaveFailures] = useState(0);
@@ -268,7 +299,7 @@ export default function MathFlashcards() {
         setCards(data.cards);
         setPhotoLibrary(data.photoLibrary);
         setPhotoGroups(data.photoGroups || []);
-        // 復元済みの画像はそのまま「保存済み」として記録し、無駄な再保存を防ぐ
+        if (data.prefs?.librarySortOrder) setLibrarySortOrder(data.prefs.librarySortOrder);
         data.cards.forEach((c) => {
           if (c.frontSrc) savedImagesRef.current.set(`card-front:${c.id}`, c.frontSrc);
           if (c.backSrc) savedImagesRef.current.set(`card-back:${c.id}`, c.backSrc);
@@ -277,12 +308,17 @@ export default function MathFlashcards() {
           if (p.src) savedImagesRef.current.set(`photo:${p.id}`, p.src);
         });
       }
+      // 保存中だったドラフトがあれば復元候補として保持
+      const draft = await loadDraft();
+      if (draft && draft.pendingCards && draft.pendingCards.length > 0) {
+        setDraftToRestore(draft);
+      }
       hasLoadedRef.current = true;
       setLoading(false);
     })();
   }, []);
 
-  // decks/cards/photoLibrary/photoGroups の変化を検知して保存する（読み込み完了後のみ、デバウンス付き）
+  // decks/cards/photoLibrary/photoGroups の変化を検知して保存する
   useEffect(() => {
     if (!hasLoadedRef.current) return;
     setSaveState("saving");
@@ -292,7 +328,8 @@ export default function MathFlashcards() {
           decks,
           cards.map((c) => ({ ...c, backSrcExists: !!c.backSrc })),
           photoLibrary,
-          photoGroups
+          photoGroups,
+          { librarySortOrder }
         );
         const imageTasks = [
           ...cards.flatMap((c) => [
@@ -328,7 +365,7 @@ export default function MathFlashcards() {
       }
     }, 600);
     return () => clearTimeout(timer);
-  }, [decks, cards, photoLibrary, photoGroups]);
+  }, [decks, cards, photoLibrary, photoGroups, librarySortOrder]);
 
   const deckCards = (deckId) => cards.filter((c) => c.deckId === deckId);
 
@@ -356,6 +393,20 @@ export default function MathFlashcards() {
 
   function setPhotoGroup(photoId, groupId) {
     setPhotoLibrary((prev) => prev.map((p) => (p.id === photoId ? { ...p, groupId } : p)));
+  }
+
+  // トリミング完了時に「最後に使った日時」を更新する（最近使った写真の表示用）
+  function touchPhotoLastUsed(photoId) {
+    if (!photoId) return;
+    setPhotoLibrary((prev) =>
+      prev.map((p) => (p.id === photoId ? { ...p, lastUsedAt: Date.now() } : p))
+    );
+  }
+
+  // 写真をライブラリから削除する
+  function deletePhoto(photoId) {
+    setPhotoLibrary((prev) => prev.filter((p) => p.id !== photoId));
+    // その写真を使っているカードの参照は残るが表示は壊れないので特に処理不要
   }
 
   function createDeck(name) {
@@ -447,6 +498,47 @@ export default function MathFlashcards() {
     <div style={styles.app}>
       <GlobalStyles />
       <SaveIndicator state={saveState} detail={saveErrorDetail} />
+
+      {/* ドラフト復元確認ダイアログ（ホーム画面でのみ表示） */}
+      {draftToRestore && screen === "home" && (
+        <div style={styles.confirmOverlay}>
+          <div style={styles.confirmDialog}>
+            <p style={styles.confirmTitle}>前回の途中データがあります</p>
+            <p style={styles.subText}>
+              {new Date(draftToRestore.savedAt).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+              に作成中だった{draftToRestore.deckName ? `「${draftToRestore.deckName}」` : "デッキ"}
+              （{draftToRestore.pendingCards.length}枚）の続きから再開できます。
+            </p>
+            <div style={styles.rowButtons}>
+              <button
+                style={styles.secondaryBtn}
+                onClick={async () => {
+                  await clearDraft();
+                  setDraftToRestore(null);
+                }}
+              >
+                捨てる
+              </button>
+              <button
+                style={styles.primaryBtnFlex}
+                onClick={async () => {
+                  // IndexedDB上のドラフトをここで消す。
+                  // 再開後にリロードしても同じダイアログが再出現しないようにするため。
+                  // （CaptureScreenでカードを追加すれば再び保存される）
+                  await clearDraft();
+                  setRestoredDraft(draftToRestore);
+                  setDraftToRestore(null);
+                  setActiveDeckId(draftToRestore.activeDeckId || null);
+                  setScreen(draftToRestore.addMode ? "capture-add" : "capture");
+                }}
+              >
+                続きから再開する
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {screen === "home" && (
         <HomeScreen
           decks={decks}
@@ -489,10 +581,18 @@ export default function MathFlashcards() {
           onSetPhotoGroup={setPhotoGroup}
           onDeleteGroup={deletePhotoGroup}
           onRenameGroup={renamePhotoGroup}
+          onTouchPhotoLastUsed={touchPhotoLastUsed}
+          onDeletePhoto={deletePhoto}
+          librarySortOrder={librarySortOrder}
+          onChangeSortOrder={setLibrarySortOrder}
           activePhotoTab={activePhotoTab}
           onChangeActivePhotoTab={setActivePhotoTab}
-          onCancel={() => setScreen("home")}
+          restoredDraft={restoredDraft}
+          onSaveDraft={(draft) => saveDraft({ ...draft, addMode: false })}
+          onCancel={async () => { await clearDraft(); setRestoredDraft(null); setScreen("home"); }}
           onCreate={(name, newCards) => {
+            clearDraft();
+            setRestoredDraft(null);
             const id = createDeck(name);
             addCardsToDeck(id, newCards);
             setActiveDeckId(id);
@@ -530,6 +630,10 @@ export default function MathFlashcards() {
           onSetPhotoGroup={setPhotoGroup}
           onDeleteGroup={deletePhotoGroup}
           onRenameGroup={renamePhotoGroup}
+          onTouchPhotoLastUsed={touchPhotoLastUsed}
+          onDeletePhoto={deletePhoto}
+          librarySortOrder={librarySortOrder}
+          onChangeSortOrder={setLibrarySortOrder}
           activePhotoTab={activePhotoTab}
           onChangeActivePhotoTab={setActivePhotoTab}
           onBack={() => setScreen("deck")}
@@ -552,11 +656,19 @@ export default function MathFlashcards() {
           onSetPhotoGroup={setPhotoGroup}
           onDeleteGroup={deletePhotoGroup}
           onRenameGroup={renamePhotoGroup}
+          onTouchPhotoLastUsed={touchPhotoLastUsed}
+          onDeletePhoto={deletePhoto}
+          librarySortOrder={librarySortOrder}
+          onChangeSortOrder={setLibrarySortOrder}
           activePhotoTab={activePhotoTab}
           onChangeActivePhotoTab={setActivePhotoTab}
           deckName={decks.find((d) => d.id === activeDeckId)?.name}
-          onCancel={() => setScreen("deck")}
+          restoredDraft={restoredDraft}
+          onSaveDraft={(draft) => saveDraft({ ...draft, addMode: true, activeDeckId })}
+          onCancel={async () => { await clearDraft(); setRestoredDraft(null); setScreen("deck"); }}
           onCreate={(_, newCards) => {
+            clearDraft();
+            setRestoredDraft(null);
             addCardsToDeck(activeDeckId, newCards);
             setScreen("deck");
           }}
@@ -912,15 +1024,43 @@ function CaptureScreen({
   onRenameGroup,
   activePhotoTab,
   onChangeActivePhotoTab,
+  onTouchPhotoLastUsed,
+  onDeletePhoto,
+  librarySortOrder = "newest",
+  onChangeSortOrder,
+  restoredDraft,
+  onSaveDraft,
 }) {
   // upload-or-pick(front/back) → crop(front/back) → more-or-back → name
   // step は履歴スタックとして保持し、「戻る」で1つ前のステップに戻れるようにする
-  const [stepStack, setStepStack] = useState([library.length > 0 ? "pick-front" : "upload-front"]);
+  const [stepStack, setStepStack] = useState(() => {
+    // 復元ドラフトがある場合、more-or-back ステップから再開する
+    if (restoredDraft) return ["more-or-back"];
+    return [library.length > 0 ? "pick-front" : "upload-front"];
+  });
   const step = stepStack[stepStack.length - 1];
-  const [activePhoto, setActivePhoto] = useState(null); // 現在トリミング対象の写真 {id, src, width, height}
-  const [deckNameInput, setDeckNameInput] = useState(deckName || "");
-  const [pendingCards, setPendingCards] = useState([]);
-  const [currentCardIdx, setCurrentCardIdx] = useState(null); // 裏を設定する対象カードのindex
+  const [activePhoto, setActivePhoto] = useState(null);
+  const [deckNameInput, setDeckNameInput] = useState(() => restoredDraft?.deckName || deckName || "");
+  const [pendingCards, setPendingCards] = useState(() => restoredDraft?.pendingCards || []);
+  const [currentCardIdx, setCurrentCardIdx] = useState(null);
+
+  // onSaveDraft は毎レンダーで新しい関数参照になるため、refで安定化させる。
+  // これにより useEffect の依存配列に含めても不要な再実行が起きない。
+  const onSaveDraftRef = useRef(onSaveDraft);
+  useEffect(() => { onSaveDraftRef.current = onSaveDraft; }, [onSaveDraft]);
+
+  // pendingCardsが変わるたびにデバウンスして自動保存（600ms遅延）
+  const draftTimerRef = useRef(null);
+  useEffect(() => {
+    if (!onSaveDraftRef.current) return;
+    if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
+    draftTimerRef.current = setTimeout(() => {
+      if (pendingCards.length > 0) {
+        onSaveDraftRef.current({ pendingCards, deckName: deckNameInput });
+      }
+    }, 600);
+    return () => clearTimeout(draftTimerRef.current);
+  }, [pendingCards, deckNameInput]);
 
   function goTo(nextStep) {
     setStepStack((prev) => [...prev, nextStep]);
@@ -963,6 +1103,7 @@ function CaptureScreen({
   }
 
   function handleFrontCropped(dataUrl) {
+    onTouchPhotoLastUsed(activePhoto?.id);
     setPendingCards((prev) => [
       ...prev,
       {
@@ -999,6 +1140,7 @@ function CaptureScreen({
   }
 
   function handleBackCropped(dataUrl) {
+    onTouchPhotoLastUsed(activePhoto?.id);
     setPendingCards((prev) =>
       prev.map((c, i) =>
         i === currentCardIdx
@@ -1050,6 +1192,9 @@ function CaptureScreen({
           onSetPhotoGroup={onSetPhotoGroup}
           onDeleteGroup={onDeleteGroup}
           onRenameGroup={onRenameGroup}
+          sortOrder={librarySortOrder}
+          onChangeSortOrder={onChangeSortOrder}
+          onDeletePhoto={onDeletePhoto}
           activeTab={activePhotoTab}
           onChangeActiveTab={onChangeActivePhotoTab}
         />
@@ -1080,6 +1225,9 @@ function CaptureScreen({
           onSetPhotoGroup={onSetPhotoGroup}
           onDeleteGroup={onDeleteGroup}
           onRenameGroup={onRenameGroup}
+          sortOrder={librarySortOrder}
+          onChangeSortOrder={onChangeSortOrder}
+          onDeletePhoto={onDeletePhoto}
           activeTab={activePhotoTab}
           onChangeActiveTab={onChangeActivePhotoTab}
         />
@@ -1199,6 +1347,9 @@ function PhotoPicker({
   onRenameGroup,
   activeTab,
   onChangeActiveTab,
+  sortOrder,
+  onChangeSortOrder,
+  onDeletePhoto,
 }) {
   const cameraRef = useRef(null);
   const uploadRef = useRef(null);
@@ -1213,7 +1364,7 @@ function PhotoPicker({
   const [editingGroupId, setEditingGroupId] = useState(null);
   const [editingGroupName, setEditingGroupName] = useState("");
   const [confirmDeleteGroupId, setConfirmDeleteGroupId] = useState(null);
-  const [sortOrder, setSortOrder] = useState("newest"); // "newest" | "oldest"
+  // sortOrder/onChangeSortOrder はpropsから受け取る（App本体で管理）
 
   // 番号はアップロード順（古い順）で固定。並び順を変えても番号がブレないようにする。
   const numbered = [...library]
@@ -1230,6 +1381,12 @@ function PhotoPicker({
     if (activeTab === "unsorted") return !p.groupId;
     return p.groupId === activeTab;
   });
+
+  // 最近使った写真（lastUsedAt がある写真を使用日時の新しい順に最大5枚）
+  const recentlyUsed = [...numbered]
+    .filter((p) => !!p.lastUsedAt)
+    .sort((a, b) => b.lastUsedAt - a.lastUsedAt)
+    .slice(0, 5);
 
   async function handleUploadChange(e) {
     setUploading(true);
@@ -1470,17 +1627,38 @@ function PhotoPicker({
             )}
           </div>
 
+          {recentlyUsed.length > 0 && (
+            <>
+              <div style={styles.sectionDivider}>
+                <span style={styles.sectionDividerLabel}>最近使った写真</span>
+              </div>
+              <div style={styles.libraryGrid}>
+                {recentlyUsed.map((p) => (
+                  <div
+                    key={p.id}
+                    style={styles.libraryThumb}
+                    onClick={() => onPickLibrary(p)}
+                  >
+                    <img src={p.src} alt="" style={styles.libraryThumbImg} />
+                    <span style={styles.libraryThumbNumber}>{p.number}</span>
+                    <span style={styles.recentBadge}>最近</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
           <div style={styles.sortRow}>
             <span style={styles.helperTextSmall}>並び順：</span>
             <button
               style={{ ...styles.sortBtn, ...(sortOrder === "newest" ? styles.sortBtnActive : {}) }}
-              onClick={() => setSortOrder("newest")}
+              onClick={() => onChangeSortOrder("newest")}
             >
               新しい順
             </button>
             <button
               style={{ ...styles.sortBtn, ...(sortOrder === "oldest" ? styles.sortBtnActive : {}) }}
-              onClick={() => setSortOrder("oldest")}
+              onClick={() => onChangeSortOrder("oldest")}
             >
               古い順
             </button>
@@ -1488,7 +1666,7 @@ function PhotoPicker({
 
           {organizing && (
             <p style={styles.helperTextSmall}>
-              写真をタップして選び、下のグループに割り当ててください（{selectedIds.size}枚選択中）
+              タップで選択（グループ割り当て）、長押しで削除（{selectedIds.size}枚選択中）
             </p>
           )}
 
@@ -1506,11 +1684,24 @@ function PhotoPicker({
                 >
                   <img src={p.src} alt="" style={styles.libraryThumbImg} />
                   <span style={styles.libraryThumbNumber}>{p.number}</span>
-                  {organizing && (
-                    <span style={{ ...styles.libraryThumbCheck, ...(isSelected ? styles.libraryThumbCheckOn : {}) }}>
-                      {isSelected ? "✓" : ""}
-                    </span>
-                  )}
+                  {organizing ? (
+                    <>
+                      <span style={{ ...styles.libraryThumbCheck, ...(isSelected ? styles.libraryThumbCheckOn : {}) }}>
+                        {isSelected ? "✓" : ""}
+                      </span>
+                      <button
+                        style={styles.libraryThumbDeleteBtn}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (window.confirm(`写真 ${p.number} を削除しますか？\nこの操作は元に戻せません。`)) {
+                            onDeletePhoto(p.id);
+                          }
+                        }}
+                      >
+                        🗑
+                      </button>
+                    </>
+                  ) : null}
                 </div>
               );
             })}
@@ -1910,6 +2101,10 @@ function EditCardScreen({
   onRenameGroup,
   activePhotoTab,
   onChangeActivePhotoTab,
+  onTouchPhotoLastUsed,
+  onDeletePhoto,
+  librarySortOrder = "newest",
+  onChangeSortOrder,
 }) {
   // null: 表示モード, "front"/"back": その面を編集中
   const [editingSide, setEditingSide] = useState(null);
@@ -1926,6 +2121,7 @@ function EditCardScreen({
   }
 
   function applyImage(side, dataUrl) {
+    onTouchPhotoLastUsed(activePhoto?.id);
     if (side === "front") {
       onUpdate({ frontType: "image", frontSrc: dataUrl, frontText: null, frontSourcePhotoId: activePhoto?.id || null });
     } else {
@@ -1993,6 +2189,9 @@ function EditCardScreen({
             onSetPhotoGroup={onSetPhotoGroup}
             onDeleteGroup={onDeleteGroup}
           onRenameGroup={onRenameGroup}
+          sortOrder={librarySortOrder}
+          onChangeSortOrder={onChangeSortOrder}
+          onDeletePhoto={onDeletePhoto}
             activeTab={activePhotoTab}
             onChangeActiveTab={onChangeActivePhotoTab}
           />
@@ -2548,6 +2747,34 @@ const styles = {
     color: STAMP,
   },
   libraryThumbCheckOn: { background: STAMP, borderColor: STAMP, color: "#FBF3EC" },
+  recentBadge: {
+    position: "absolute",
+    bottom: 4,
+    right: 4,
+    background: "rgba(60,110,84,0.88)",
+    color: "#FBF3EC",
+    fontSize: 9,
+    fontWeight: 700,
+    borderRadius: 6,
+    padding: "2px 5px",
+    letterSpacing: "0.04em",
+  },
+  libraryThumbDeleteBtn: {
+    position: "absolute",
+    bottom: 4,
+    left: 4,
+    width: 24,
+    height: 24,
+    borderRadius: 8,
+    background: "rgba(154,58,38,0.82)",
+    border: "none",
+    fontSize: 13,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 0,
+    lineHeight: 1,
+  },
 
   // 写真グループのタブ・整理UI
   dividerBtnGroup: { display: "flex", gap: 14, marginLeft: "auto" },
