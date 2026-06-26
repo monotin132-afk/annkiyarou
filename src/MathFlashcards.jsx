@@ -449,6 +449,18 @@ export default function MathFlashcards() {
     setCards((prev) => prev.map((c) => (c.id === cardId ? { ...c, ...patch } : c)));
   }
 
+  function toggleStarred(cardId) {
+    setCards((prev) => prev.map((c) => (c.id === cardId ? { ...c, starred: !c.starred } : c)));
+  }
+
+  // 指定カードIDの習熟度・統計をリセットする（「最初からやり直す」用）
+  function resetLevels(cardIds) {
+    const idSet = new Set(cardIds);
+    setCards((prev) =>
+      prev.map((c) => (idSet.has(c.id) ? { ...c, level: 0, seen: 0, correct: 0 } : c))
+    );
+  }
+
   function deleteCard(cardId) {
     setCards((prev) => prev.filter((c) => c.id !== cardId));
     setDecks((prev) =>
@@ -590,6 +602,11 @@ export default function MathFlashcards() {
           }}
           onExport={exportAllData}
           onImport={importAllData}
+          onStudyStarred={() => {
+            const ids = cards.filter((c) => c.starred).map((c) => c.id);
+            if (ids.length > 0) startStudy(ids, "random");
+          }}
+          onResetAllLevels={() => resetLevels(cards.map((c) => c.id))}
           showBackupWarning={consecutiveSaveFailures >= 3}
         />
       )}
@@ -643,10 +660,13 @@ export default function MathFlashcards() {
           onBack={() => setScreen("home")}
           onAddMore={() => setScreen("capture-add")}
           onStudy={(mode) => startStudy(deckCards(activeDeckId).map((c) => c.id), mode)}
+          onStudyStarred={(cardIds) => startStudy(cardIds, "random")}
           onOpenCard={(cardId) => {
             setActiveCardId(cardId);
             setScreen("edit-card");
           }}
+          onToggleStar={toggleStarred}
+          onResetLevels={(cardIds) => resetLevels(cardIds)}
           onDeleteDeck={() => {
             deleteDeck(activeDeckId);
             setActiveDeckId(null);
@@ -673,6 +693,7 @@ export default function MathFlashcards() {
           onChangeActivePhotoTab={setActivePhotoTab}
           onBack={() => setScreen("deck")}
           onUpdate={(patch) => updateCard(activeCardId, patch)}
+          onToggleStar={() => toggleStarred(activeCardId)}
           onDelete={() => {
             deleteCard(activeCardId);
             setActiveCardId(null);
@@ -715,6 +736,7 @@ export default function MathFlashcards() {
           cards={cards.filter((c) => studyQueue.cardIds.includes(c.id))}
           mode={studyQueue.mode}
           onResult={updateCardResult}
+          onToggleStar={toggleStarred}
           onExit={() => {
             setStudyQueue(null);
             setScreen(activeDeckId ? "deck" : "home");
@@ -733,12 +755,16 @@ function HomeScreen({
   onOpenDeck,
   onOpenReviewPicker,
   onStudyWeakOnly,
+  onStudyStarred,
+  onResetAllLevels,
   onExport,
   onImport,
   showBackupWarning,
 }) {
   const totalCards = cards.length;
   const weakCount = cards.filter((c) => c.level <= 1).length;
+  const starredCount = cards.filter((c) => c.starred).length;
+  const [confirmingReset, setConfirmingReset] = useState(false);
 
   return (
     <div style={styles.screen}>
@@ -774,6 +800,12 @@ function HomeScreen({
               accent
               onClick={weakCount > 0 ? onStudyWeakOnly : undefined}
             />
+            <StatPill
+              label="★マーク"
+              value={starredCount}
+              star
+              onClick={starredCount > 0 ? onStudyStarred : undefined}
+            />
           </div>
 
           {weakCount > 0 && (
@@ -786,6 +818,16 @@ function HomeScreen({
             </button>
           )}
 
+          {starredCount > 0 && (
+            <button style={styles.starCta} onClick={onStudyStarred}>
+              <span style={styles.starCtaGlyph}>★</span>
+              <span style={styles.reviewCtaText}>
+                <span style={styles.starCtaTitle}>★マークの {starredCount} 枚を復習する</span>
+                <span style={styles.starCtaSub}>自分でマークしたカードだけをまとめて出題します</span>
+              </span>
+            </button>
+          )}
+
           {totalCards > 0 && (
             <button style={styles.reviewCta} onClick={onOpenReviewPicker}>
               <span style={styles.reviewCtaGlyph}>⟲</span>
@@ -794,6 +836,27 @@ function HomeScreen({
                 <span style={styles.reviewCtaSub}>複数の単元をまとめて復習できます</span>
               </span>
             </button>
+          )}
+
+          {/* 苦手リセット */}
+          {weakCount > 0 && (
+            <div style={styles.resetRow}>
+              {!confirmingReset ? (
+                <button style={styles.dangerLinkBtn} onClick={() => setConfirmingReset(true)}>
+                  苦手の記録をリセットして最初からやり直す
+                </button>
+              ) : (
+                <div style={styles.dangerConfirmBox}>
+                  <p style={styles.subText}>全デッキの苦手度・出題回数をリセットします。カード自体は削除されません。</p>
+                  <div style={styles.rowButtons}>
+                    <button style={styles.secondaryBtn} onClick={() => setConfirmingReset(false)}>やめる</button>
+                    <button style={styles.dangerBtn} onClick={() => { onResetAllLevels(); setConfirmingReset(false); }}>
+                      リセットする
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
 
           <div style={styles.sectionDivider}>
@@ -1079,17 +1142,22 @@ function SaveIndicator({ state, detail }) {
   );
 }
 
-function StatPill({ label, value, accent, onClick }) {
+function StatPill({ label, value, accent, star, onClick }) {
   return (
     <div
       style={{
         ...styles.statPill,
         ...(accent ? styles.statPillAccent : {}),
+        ...(star ? styles.statPillStar : {}),
         ...(onClick ? styles.statPillClickable : {}),
       }}
       onClick={onClick}
     >
-      <div style={{ ...styles.statValue, ...(accent && value > 0 ? styles.statValueAccent : {}) }}>{value}</div>
+      <div style={{
+        ...styles.statValue,
+        ...(accent && value > 0 ? styles.statValueAccent : {}),
+        ...(star && value > 0 ? styles.statValueStar : {}),
+      }}>{value}</div>
       <div style={styles.statLabel}>{label}</div>
     </div>
   );
@@ -2177,10 +2245,12 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
 }
 
 // ---------- デッキ詳細画面 ----------
-function DeckScreen({ deck, cards, onBack, onAddMore, onStudy, onOpenCard, onDeleteDeck }) {
+function DeckScreen({ deck, cards, onBack, onAddMore, onStudy, onStudyStarred, onOpenCard, onToggleStar, onResetLevels, onDeleteDeck }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [confirmingReset, setConfirmingReset] = useState(false);
   if (!deck) return null;
   const weak = cards.filter((c) => c.level <= 1).length;
+  const starred = cards.filter((c) => c.starred);
   return (
     <div style={styles.screen}>
       <header style={styles.headerRow}>
@@ -2192,6 +2262,7 @@ function DeckScreen({ deck, cards, onBack, onAddMore, onStudy, onOpenCard, onDel
       <div style={styles.statsRow}>
         <StatPill label="カード" value={cards.length} />
         <StatPill label="苦手" value={weak} accent onClick={weak > 0 ? () => onStudy("weak-only") : undefined} />
+        <StatPill label="★マーク" value={starred.length} star onClick={starred.length > 0 ? () => onStudyStarred(starred.map((c) => c.id)) : undefined} />
       </div>
 
       <div style={styles.studyAllRow}>
@@ -2202,6 +2273,12 @@ function DeckScreen({ deck, cards, onBack, onAddMore, onStudy, onOpenCard, onDel
           ランダムで復習
         </button>
       </div>
+
+      {starred.length > 0 && (
+        <button style={styles.starCtaSmall} onClick={() => onStudyStarred(starred.map((c) => c.id))}>
+          ★ マークした {starred.length} 枚だけ復習
+        </button>
+      )}
 
       <button style={styles.secondaryBtnFull} onClick={onAddMore}>
         ＋ このデッキに写真を追加
@@ -2217,30 +2294,62 @@ function DeckScreen({ deck, cards, onBack, onAddMore, onStudy, onOpenCard, onDel
         <div style={styles.pendingGrid}>
           {cards.map((c) => (
             <div key={c.id} style={styles.pendingCardClickable} onClick={() => onOpenCard(c.id)}>
+              <div style={styles.cardThumbHeader}>
+                <LevelBar level={c.level} />
+                <button
+                  style={{ ...styles.starBadge, color: c.starred ? "#C28A35" : "#D0C8B0" }}
+                  onClick={(e) => { e.stopPropagation(); onToggleStar(c.id); }}
+                >★</button>
+              </div>
               <CardThumb src={c.frontSrc} text={c.frontText} />
-              <LevelBar level={c.level} />
             </div>
           ))}
         </div>
       )}
 
       <div style={styles.dangerZone}>
-        {!confirmingDelete ? (
-          <button style={styles.dangerLinkBtn} onClick={() => setConfirmingDelete(true)}>
-            このデッキを削除する
-          </button>
-        ) : (
-          <div style={styles.dangerConfirmBox}>
-            <p style={styles.subText}>「{deck.name}」とその中のカード {cards.length} 枚をすべて削除します。元に戻せません。</p>
-            <div style={styles.rowButtons}>
-              <button style={styles.secondaryBtn} onClick={() => setConfirmingDelete(false)}>
-                やめる
+        {/* 苦手リセット */}
+        {weak > 0 && !confirmingDelete && (
+          <div style={{ marginBottom: 14 }}>
+            {!confirmingReset ? (
+              <button style={styles.dangerLinkBtn} onClick={() => setConfirmingReset(true)}>
+                このデッキの苦手をリセットして最初からやり直す
               </button>
-              <button style={styles.dangerBtn} onClick={onDeleteDeck}>
-                削除する
-              </button>
-            </div>
+            ) : (
+              <div style={styles.dangerConfirmBox}>
+                <p style={styles.subText}>「{deck.name}」の全カードの苦手度・出題回数をリセットします。カード自体は削除されません。</p>
+                <div style={styles.rowButtons}>
+                  <button style={styles.secondaryBtn} onClick={() => setConfirmingReset(false)}>やめる</button>
+                  <button style={styles.dangerBtn} onClick={() => { onResetLevels(cards.map((c) => c.id)); setConfirmingReset(false); }}>
+                    リセットする
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
+        )}
+
+        {/* デッキ削除 */}
+        {!confirmingReset && (
+          <>
+            {!confirmingDelete ? (
+              <button style={styles.dangerLinkBtn} onClick={() => setConfirmingDelete(true)}>
+                このデッキを削除する
+              </button>
+            ) : (
+              <div style={styles.dangerConfirmBox}>
+                <p style={styles.subText}>「{deck.name}」とその中のカード {cards.length} 枚をすべて削除します。元に戻せません。</p>
+                <div style={styles.rowButtons}>
+                  <button style={styles.secondaryBtn} onClick={() => setConfirmingDelete(false)}>
+                    やめる
+                  </button>
+                  <button style={styles.dangerBtn} onClick={onDeleteDeck}>
+                    削除する
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -2264,6 +2373,7 @@ function EditCardScreen({
   onAddPhoto,
   onBack,
   onUpdate,
+  onToggleStar,
   onDelete,
   photoGroups = [],
   onCreateGroup,
@@ -2394,7 +2504,16 @@ function EditCardScreen({
           ← デッキに戻る
         </button>
       </header>
-      <h1 style={styles.h1}>カードを編集</h1>
+      <div style={styles.editCardTitleRow}>
+        <h1 style={{ ...styles.h1, margin: 0 }}>カードを編集</h1>
+        <button
+          style={{ ...styles.starToggleBtn, color: card.starred ? "#C28A35" : "#C7BCA0" }}
+          onClick={onToggleStar}
+          title={card.starred ? "★マークを外す" : "★マークをつける"}
+        >
+          {card.starred ? "★" : "☆"}
+        </button>
+      </div>
 
       <p style={styles.sectionLabel}>問題文（表）</p>
       <div style={styles.editCardFace}>
@@ -2511,7 +2630,7 @@ function StudyFace({ type, src, text }) {
 }
 
 // ---------- 学習（フリップカード）画面 ----------
-function StudyScreen({ cards, mode, onResult, onExit }) {
+function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
   const [queue, setQueue] = useState([]);
   const [idx, setIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
@@ -2595,6 +2714,13 @@ function StudyScreen({ cards, mode, onResult, onExit }) {
           >
             <div style={styles.flipFace}>
               <span style={styles.faceLabel}>問題</span>
+              {/* ★ボタン：タップしてもフリップしないようにstopPropagation */}
+              <button
+                style={{ ...styles.studyStarBtn, color: current.starred ? "#C28A35" : "#D0C8B0" }}
+                onClick={(e) => { e.stopPropagation(); onToggleStar(current.id); }}
+              >
+                {current.starred ? "★" : "☆"}
+              </button>
               <StudyFace type={current.frontType} src={current.frontSrc} text={current.frontText} />
               {hasBack ? (
                 !flipped && <div style={styles.tapHint}>タップして答えを見る</div>
@@ -2604,6 +2730,12 @@ function StudyScreen({ cards, mode, onResult, onExit }) {
             </div>
             <div style={{ ...styles.flipFace, ...styles.flipFaceBack }}>
               <span style={styles.faceLabelBack}>答え</span>
+              <button
+                style={{ ...styles.studyStarBtn, color: current.starred ? "#C28A35" : "#D0C8B0" }}
+                onClick={(e) => { e.stopPropagation(); onToggleStar(current.id); }}
+              >
+                {current.starred ? "★" : "☆"}
+              </button>
               {hasBack && <StudyFace type={current.backType} src={current.backSrc} text={current.backText} />}
             </div>
           </div>
@@ -3330,6 +3462,80 @@ const styles = {
   shareMethodLabel: { fontSize: 13.5, fontWeight: 700, color: INK, margin: "0 0 4px" },
   dataMessageOk: { fontSize: 13, color: GREEN, fontWeight: 600, marginTop: 4 },
   dataMessageError: { fontSize: 13, color: STAMP, fontWeight: 600, marginTop: 4 },
+
+  // ★マーク関連
+  starCta: {
+    display: "flex",
+    alignItems: "center",
+    gap: 14,
+    width: "100%",
+    textAlign: "left",
+    background: "#FFFBEE",
+    border: "1.5px solid #C28A35",
+    borderRadius: 14,
+    padding: "14px 18px",
+    marginBottom: 12,
+  },
+  starCtaGlyph: { fontSize: 20, color: "#C28A35" },
+  starCtaTitle: { color: INK, fontWeight: 700, fontSize: 15 },
+  starCtaSub: { color: MUTED, fontSize: 12 },
+  starCtaSmall: {
+    width: "100%",
+    background: "#FFFBEE",
+    border: "1.5px solid #C28A35",
+    borderRadius: 11,
+    padding: "12px 16px",
+    fontSize: 14,
+    fontWeight: 700,
+    color: "#8A6020",
+    marginBottom: 12,
+    textAlign: "left",
+  },
+  // DeckScreenのカード一覧ヘッダー（LevelBar + ★ボタン）
+  cardThumbHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 4,
+  },
+  starBadge: {
+    background: "none",
+    border: "none",
+    fontSize: 16,
+    padding: "0 2px",
+    lineHeight: 1,
+  },
+  // StudyScreenの★ボタン
+  studyStarBtn: {
+    position: "absolute",
+    top: 14,
+    right: 16,
+    background: "none",
+    border: "none",
+    fontSize: 22,
+    padding: 0,
+    lineHeight: 1,
+    zIndex: 1,
+  },
+  // EditCardScreenのタイトル行
+  editCardTitleRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    margin: "5px 0 16px",
+  },
+  starToggleBtn: {
+    background: "none",
+    border: "none",
+    fontSize: 30,
+    padding: 0,
+    lineHeight: 1,
+  },
+  // HomeScreenの苦手リセットボタン行
+  resetRow: { marginTop: 4, marginBottom: 4 },
+  // StatPillの★用
+  statPillStar: { borderColor: "#E8D7A0" },
+  statValueStar: { color: "#C28A35" },
   backupWarning: {
     background: "#FCF1ED",
     border: "1px solid #E4B7A6",
