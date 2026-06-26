@@ -423,6 +423,11 @@ export default function MathFlashcards() {
     return id;
   }
 
+  function renameDeck(deckId, newName) {
+    if (!newName.trim()) return;
+    setDecks((prev) => prev.map((d) => (d.id === deckId ? { ...d, name: newName.trim() } : d)));
+  }
+
   function addCardsToDeck(deckId, newCards) {
     const stamped = newCards.map((c) => ({ ...c, deckId }));
     setCards((prev) => [...prev, ...stamped]);
@@ -661,6 +666,7 @@ export default function MathFlashcards() {
           onAddMore={() => setScreen("capture-add")}
           onStudy={(mode) => startStudy(deckCards(activeDeckId).map((c) => c.id), mode)}
           onStudyStarred={(cardIds) => startStudy(cardIds, "random")}
+          onRenameDeck={(name) => renameDeck(activeDeckId, name)}
           onOpenCard={(cardId) => {
             setActiveCardId(cardId);
             setScreen("edit-card");
@@ -2245,12 +2251,24 @@ function Cropper({ photo, instruction, confirmLabel, onConfirm, onBackToPicker }
 }
 
 // ---------- デッキ詳細画面 ----------
-function DeckScreen({ deck, cards, onBack, onAddMore, onStudy, onStudyStarred, onOpenCard, onToggleStar, onResetLevels, onDeleteDeck }) {
+function DeckScreen({ deck, cards, onBack, onAddMore, onStudy, onStudyStarred, onOpenCard, onToggleStar, onResetLevels, onRenameDeck, onDeleteDeck }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [confirmingReset, setConfirmingReset] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameInput, setNameInput] = useState("");
   if (!deck) return null;
   const weak = cards.filter((c) => c.level <= 1).length;
   const starred = cards.filter((c) => c.starred);
+
+  function startEditName() {
+    setNameInput(deck.name);
+    setEditingName(true);
+  }
+  function commitName() {
+    if (nameInput.trim()) onRenameDeck(nameInput.trim());
+    setEditingName(false);
+  }
+
   return (
     <div style={styles.screen}>
       <header style={styles.headerRow}>
@@ -2258,7 +2276,24 @@ function DeckScreen({ deck, cards, onBack, onAddMore, onStudy, onStudyStarred, o
           ← ホーム
         </button>
       </header>
-      <h1 style={styles.h1}>{deck.name}</h1>
+      {editingName ? (
+        <div style={styles.deckNameEditRow}>
+          <input
+            style={styles.deckNameInput}
+            value={nameInput}
+            autoFocus
+            onChange={(e) => setNameInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") commitName(); if (e.key === "Escape") setEditingName(false); }}
+          />
+          <button style={styles.primaryBtnFlex} onClick={commitName}>保存</button>
+          <button style={styles.secondaryBtn} onClick={() => setEditingName(false)}>戻す</button>
+        </div>
+      ) : (
+        <div style={styles.deckNameRow}>
+          <h1 style={{ ...styles.h1, margin: 0 }}>{deck.name}</h1>
+          <button style={styles.editNameBtn} onClick={startEditName} title="名前を変更">✎</button>
+        </div>
+      )}
       <div style={styles.statsRow}>
         <StatPill label="カード" value={cards.length} />
         <StatPill label="苦手" value={weak} accent onClick={weak > 0 ? () => onStudy("weak-only") : undefined} />
@@ -2392,6 +2427,7 @@ function EditCardScreen({
   const [editSubStep, setEditSubStep] = useState("pick"); // pick | crop
   const [activePhoto, setActivePhoto] = useState(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [showSourcePhoto, setShowSourcePhoto] = useState(null); // 表示中の元写真 {src, label} | null
 
   if (!card) return null;
 
@@ -2494,8 +2530,6 @@ function EditCardScreen({
   // 元になった写真（履歴）を探す。ライブラリから消えている場合は見つからない
   const frontSourcePhoto = card.frontSourcePhotoId ? library.find((p) => p.id === card.frontSourcePhotoId) : null;
   const backSourcePhoto = card.backSourcePhotoId ? library.find((p) => p.id === card.backSourcePhotoId) : null;
-  const [showSourcePhoto, setShowSourcePhoto] = useState(null); // 表示中の元写真 {src, label} | null
-
   // ----- 通常の表示・編集導線 -----
   return (
     <div style={styles.screen}>
@@ -2567,6 +2601,15 @@ function EditCardScreen({
         </div>
       )}
 
+      {/* メモ欄 */}
+      <p style={{ ...styles.sectionLabel, marginTop: 22 }}>メモ（ひとこと）</p>
+      <textarea
+        style={styles.memoArea}
+        value={card.memo || ""}
+        placeholder="この公式は微分で出る、など自由に書けます"
+        onChange={(e) => onUpdate({ memo: e.target.value })}
+      />
+
       <div style={{ ...styles.statsRow, marginTop: 22 }}>
         <StatPill label="出題回数" value={card.seen} />
         <StatPill label="正解数" value={card.correct} />
@@ -2635,15 +2678,13 @@ function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
   const [idx, setIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [done, setDone] = useState(false);
+  // セッション中の結果ログ: [{cardId, known}]
+  const [resultLog, setResultLog] = useState([]);
 
   // マウント時に1回だけ出題順を確定する。
-  // cards は親コンポーネントの state からフィルタした新しい配列が
-  // 毎レンダー渡されるため、依存配列に入れると回答ごとに再シャッフルされて
-  // 「ボタンを押しても進まない（1問目に戻る）」事象が起きる。
   useEffect(() => {
     let pool = [...cards];
     if (mode === "weak-only") {
-      // 苦手（レベル0,1）のカードだけに絞る
       pool = pool.filter((c) => c.level <= 1);
       pool.sort(() => Math.random() - 0.5);
     } else if (mode === "weak") {
@@ -2655,6 +2696,7 @@ function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
     setIdx(0);
     setFlipped(false);
     setDone(false);
+    setResultLog([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2662,7 +2704,10 @@ function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
   const hasBack = current && !!current.backType;
 
   function next(known) {
-    if (current) onResult(current.id, known);
+    if (current) {
+      onResult(current.id, known);
+      setResultLog((prev) => [...prev, { cardId: current.id, known }]);
+    }
     if (idx + 1 >= queue.length) {
       setDone(true);
     } else {
@@ -2673,18 +2718,79 @@ function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
 
   const noWeakCards = mode === "weak-only" && queue.length === 0;
 
-  if (done || !current) {
+  // ---------- サマリー画面 ----------
+  if (done || (noWeakCards && queue.length === 0)) {
+    const total = resultLog.length;
+    const correctCount = resultLog.filter((r) => r.known).length;
+    const wrongIds = new Set(resultLog.filter((r) => !r.known).map((r) => r.cardId));
+    const wrongCards = queue.filter((c) => wrongIds.has(c.id));
+    const pct = total > 0 ? Math.round((correctCount / total) * 100) : 0;
+
     return (
       <div style={styles.screen}>
-        <div style={styles.emptyState}>
-          <div style={styles.emptyGlyph}>{noWeakCards ? "☺" : "✓"}</div>
-          <p style={styles.emptyText}>
-            {noWeakCards ? "今のところ苦手なカードはありません" : "このセッションは終了です"}
-          </p>
-          <button style={styles.primaryBtn} onClick={onExit}>
-            戻る
-          </button>
-        </div>
+        <header style={styles.headerRow}>
+          <button style={styles.linkBtn} onClick={onExit}>← 戻る</button>
+        </header>
+
+        {noWeakCards && total === 0 ? (
+          <div style={styles.emptyState}>
+            <div style={styles.emptyGlyph}>☺</div>
+            <p style={styles.emptyText}>今のところ苦手なカードはありません</p>
+            <button style={styles.primaryBtn} onClick={onExit}>戻る</button>
+          </div>
+        ) : (
+          <>
+            <h1 style={styles.h1}>セッション終了</h1>
+
+            {/* スコアサークル */}
+            <div style={styles.summaryScoreRow}>
+              <div style={{
+                ...styles.summaryScoreCircle,
+                background: `conic-gradient(#3C6E54 0% ${pct}%, #E3DACB ${pct}% 100%)`,
+              }}>
+                <span style={styles.summaryScorePct}>{pct}<span style={styles.summaryScorePctUnit}>%</span></span>
+                <span style={styles.summaryScoreLabel}>正解率</span>
+              </div>
+              <div style={styles.summaryStats}>
+                <div style={styles.summaryStatItem}>
+                  <span style={styles.summaryStatValue}>{total}</span>
+                  <span style={styles.summaryStatLabel}>出題</span>
+                </div>
+                <div style={styles.summaryStatDivider} />
+                <div style={styles.summaryStatItem}>
+                  <span style={{ ...styles.summaryStatValue, color: "#3C6E54" }}>{correctCount}</span>
+                  <span style={styles.summaryStatLabel}>正解</span>
+                </div>
+                <div style={styles.summaryStatDivider} />
+                <div style={styles.summaryStatItem}>
+                  <span style={{ ...styles.summaryStatValue, color: "#B5482F" }}>{total - correctCount}</span>
+                  <span style={styles.summaryStatLabel}>不正解</span>
+                </div>
+              </div>
+            </div>
+
+            {/* 不正解カード一覧 */}
+            {wrongCards.length > 0 && (
+              <>
+                <div style={styles.sectionDivider}>
+                  <span style={styles.sectionDividerLabel}>もう一度見直したいカード（{wrongCards.length}枚）</span>
+                </div>
+                <div style={styles.summaryWrongGrid}>
+                  {wrongCards.map((c) => (
+                    <div key={c.id} style={styles.summaryWrongCard}>
+                      <CardThumb src={c.frontSrc} text={c.frontText} />
+                      {c.memo && <p style={styles.summaryCardMemo}>📝 {c.memo}</p>}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            <button style={{ ...styles.primaryBtn, marginTop: 24 }} onClick={onExit}>
+              デッキに戻る
+            </button>
+          </>
+        )}
       </div>
     );
   }
@@ -2737,6 +2843,12 @@ function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
                 {current.starred ? "★" : "☆"}
               </button>
               {hasBack && <StudyFace type={current.backType} src={current.backSrc} text={current.backText} />}
+              {current.memo && (
+                <div style={styles.studyMemoBox}>
+                  <span style={styles.studyMemoIcon}>📝</span>
+                  <span style={styles.studyMemoText}>{current.memo}</span>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -3462,6 +3574,148 @@ const styles = {
   shareMethodLabel: { fontSize: 13.5, fontWeight: 700, color: INK, margin: "0 0 4px" },
   dataMessageOk: { fontSize: 13, color: GREEN, fontWeight: 600, marginTop: 4 },
   dataMessageError: { fontSize: 13, color: STAMP, fontWeight: 600, marginTop: 4 },
+
+  // デッキ名編集
+  deckNameRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    margin: "5px 0 16px",
+  },
+  editNameBtn: {
+    background: "none",
+    border: "none",
+    fontSize: 18,
+    color: "#B5482F",
+    padding: "0 4px",
+    lineHeight: 1,
+    opacity: 0.7,
+  },
+  deckNameEditRow: {
+    display: "flex",
+    gap: 8,
+    alignItems: "center",
+    margin: "5px 0 16px",
+  },
+  deckNameInput: {
+    flex: 1,
+    padding: "10px 12px",
+    borderRadius: 10,
+    border: "1.5px solid #B5482F",
+    fontSize: 17,
+    fontWeight: 700,
+    background: "#FBF8F0",
+    fontFamily: "'Zen Old Mincho', 'Hiragino Mincho ProN', serif",
+  },
+
+  // メモ欄
+  memoArea: {
+    width: "100%",
+    minHeight: 72,
+    padding: "11px 13px",
+    borderRadius: 10,
+    border: "1px solid #DCD2B8",
+    fontSize: 14,
+    background: "#FBF8F0",
+    fontFamily: "'Zen Maru Gothic', 'Hiragino Sans', sans-serif",
+    resize: "vertical",
+    lineHeight: 1.6,
+    color: "#221F1A",
+  },
+  // 学習中のメモ表示
+  studyMemoBox: {
+    position: "absolute",
+    bottom: 14,
+    left: 16,
+    right: 16,
+    background: "#FFFEF5",
+    border: "1px solid #E8D7A0",
+    borderRadius: 8,
+    padding: "7px 10px",
+    display: "flex",
+    gap: 6,
+    alignItems: "flex-start",
+  },
+  studyMemoIcon: { fontSize: 13, flexShrink: 0 },
+  studyMemoText: {
+    fontSize: 12,
+    color: "#5A5347",
+    lineHeight: 1.5,
+    wordBreak: "break-word",
+  },
+
+  // 振り返りサマリー
+  summaryScoreRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 20,
+    background: "#FBF8F0",
+    border: "1px solid #DCD2B8",
+    borderRadius: 16,
+    padding: "20px 22px",
+    marginBottom: 20,
+  },
+  summaryScoreCircle: {
+    width: 88,
+    height: 88,
+    borderRadius: "50%",
+    background: "conic-gradient(#3C6E54 0%, #3C6E54 var(--pct, 0%), #E3DACB var(--pct, 0%))",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+    boxShadow: "inset 0 0 0 12px #FBF8F0",
+  },
+  summaryScorePct: {
+    fontFamily: "'Zen Old Mincho', 'Hiragino Mincho ProN', serif",
+    fontSize: 24,
+    fontWeight: 700,
+    color: "#221F1A",
+    lineHeight: 1,
+  },
+  summaryScorePctUnit: { fontSize: 13, fontWeight: 600 },
+  summaryScoreLabel: { fontSize: 11, color: "#8B8270", marginTop: 3, fontWeight: 600, letterSpacing: "0.04em" },
+  summaryStats: {
+    flex: 1,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-around",
+  },
+  summaryStatItem: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 4,
+  },
+  summaryStatValue: {
+    fontFamily: "'Zen Old Mincho', 'Hiragino Mincho ProN', serif",
+    fontSize: 28,
+    fontWeight: 700,
+    lineHeight: 1,
+    color: "#221F1A",
+  },
+  summaryStatLabel: { fontSize: 11, color: "#8B8270", fontWeight: 600, letterSpacing: "0.04em" },
+  summaryStatDivider: { width: 1, height: 40, background: "#DCD2B8" },
+  summaryWrongGrid: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: 10,
+    marginBottom: 8,
+  },
+  summaryWrongCard: {
+    background: "#FBF8F0",
+    border: "1px solid #DCD2B8",
+    borderRadius: 12,
+    padding: 8,
+  },
+  summaryCardMemo: {
+    fontSize: 11,
+    color: "#8B8270",
+    margin: "6px 0 0",
+    lineHeight: 1.4,
+    wordBreak: "break-word",
+  },
 
   // ★マーク関連
   starCta: {
