@@ -284,7 +284,6 @@ export default function MathFlashcards() {
   const [loading, setLoading] = useState(true);
   const [draftToRestore, setDraftToRestore] = useState(null); // 復元候補のドラフト
   const [restoredDraft, setRestoredDraft] = useState(null); // CaptureScreenに渡す復元済みドラフト
-  const [sharedImport, setSharedImport] = useState(null); // URLリンク経由の取り込み候補 {decks, cards}
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved | error
   const [saveErrorDetail, setSaveErrorDetail] = useState(null);
   const [consecutiveSaveFailures, setConsecutiveSaveFailures] = useState(0);
@@ -313,13 +312,6 @@ export default function MathFlashcards() {
       const draft = await loadDraft();
       if (draft && draft.pendingCards && draft.pendingCards.length > 0) {
         setDraftToRestore(draft);
-      }
-      // URLハッシュに共有データがあれば取り込み確認を表示
-      const shared = decodeShareUrl(window.location.hash);
-      if (shared && Array.isArray(shared.decks) && Array.isArray(shared.cards)) {
-        setSharedImport(shared);
-        // ハッシュをURLから取り除く（リロードで再度ダイアログが出ないように）
-        history.replaceState(null, "", window.location.pathname + window.location.search);
       }
       hasLoadedRef.current = true;
       setLoading(false);
@@ -529,11 +521,7 @@ export default function MathFlashcards() {
               </button>
               <button
                 style={styles.primaryBtnFlex}
-                onClick={async () => {
-                  // IndexedDB上のドラフトをここで消す。
-                  // 再開後にリロードしても同じダイアログが再出現しないようにするため。
-                  // （CaptureScreenでカードを追加すれば再び保存される）
-                  await clearDraft();
+                onClick={() => {
                   setRestoredDraft(draftToRestore);
                   setDraftToRestore(null);
                   setActiveDeckId(draftToRestore.activeDeckId || null);
@@ -541,33 +529,6 @@ export default function MathFlashcards() {
                 }}
               >
                 続きから再開する
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {sharedImport && (
-        <div style={styles.confirmOverlay}>
-          <div style={styles.confirmDialog}>
-            <p style={styles.confirmTitle}>カードを取り込みますか？</p>
-            <p style={styles.subText}>
-              共有リンクから {sharedImport.decks.length} デッキ・{sharedImport.cards.length} 枚のカードを受け取りました。
-              取り込むと、今このブラウザに保存されているデータはすべて上書きされます。
-            </p>
-            <div style={styles.rowButtons}>
-              <button style={styles.secondaryBtn} onClick={() => setSharedImport(null)}>
-                キャンセル
-              </button>
-              <button
-                style={styles.primaryBtnFlex}
-                onClick={() => {
-                  const result = importAllData(JSON.stringify(sharedImport));
-                  setSharedImport(null);
-                  if (!result.ok) alert(`取り込みに失敗しました：${result.error}`);
-                }}
-              >
-                取り込む
               </button>
             </div>
           </div>
@@ -825,139 +786,52 @@ function HomeScreen({
         </>
       )}
 
-      <DataTransferSection onExport={onExport} onImport={onImport} hasData={decks.length > 0} decks={decks} cards={cards} />
+      <DataTransferSection onExport={onExport} onImport={onImport} hasData={decks.length > 0} />
     </div>
   );
 }
 
 // ---------- データの書き出し・読み込み（別デバイス・別ブラウザへの引っ越し用） ----------
-// ---------- 共有用URLエンコード/デコード ----------
-// JSONをbase64urlに圧縮してURLハッシュに埋め込む。
-// 画像(base64 dataURL)をそのまま入れるとURLが巨大になるため、
-// カードの画像は「含む/含まない」をユーザーが選べるようにする。
-// ここではテキストのみのカード（frontType="text", backType="text"|null）のみURLに乗せる。
-// 画像入りカードはファイル共有を案内する。
-
-function encodeShareUrl(payload) {
-  const json = JSON.stringify(payload);
-  // btoa はUTF-8非対応なのでencodeURIComponent経由でエスケープ
-  const b64 = btoa(unescape(encodeURIComponent(json)));
-  const url = `${window.location.origin}${window.location.pathname}#share=${b64}`;
-  return url;
-}
-
-function decodeShareUrl(hash) {
-  try {
-    const match = hash.match(/[#&]share=([^&]*)/);
-    if (!match) return null;
-    const json = decodeURIComponent(escape(atob(match[1])));
-    return JSON.parse(json);
-  } catch {
-    return null;
-  }
-}
-
-function DataTransferSection({ onExport, onImport, hasData, decks, cards }) {
+function DataTransferSection({ onExport, onImport, hasData }) {
   const fileRef = useRef(null);
   const [confirming, setConfirming] = useState(false);
-  const [pendingJson, setPendingJson] = useState(null); // ファイルまたはURL由来のjson文字列
-  const [pendingLabel, setPendingLabel] = useState(""); // 確認ダイアログに表示するラベル
+  const [pendingFile, setPendingFile] = useState(null);
   const [message, setMessage] = useState(null); // {type: 'ok'|'error', text}
-  const [sharing, setSharing] = useState(false);
 
-  // ---- 書き出し（iOS: Web Share API / その他: ダウンロード） ----
   async function handleExport() {
     try {
       const json = await onExport();
       const blob = new Blob([json], { type: "application/json" });
-      const date = new Date().toISOString().slice(0, 10);
-      const fileName = `math-flashcards-${date}.json`;
-
-      // Web Share API（iOS Safari / Android Chrome など）
-      if (navigator.canShare && navigator.canShare({ files: [new File([blob], fileName, { type: "application/json" })] })) {
-        const file = new File([blob], fileName, { type: "application/json" });
-        await navigator.share({ files: [file], title: "数学カード データ" });
-        setMessage({ type: "ok", text: "共有しました" });
-        return;
-      }
-
-      // フォールバック: <a>ダウンロード（PC / 対応ブラウザ）
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
+      const date = new Date().toISOString().slice(0, 10);
       a.href = url;
-      a.download = fileName;
+      a.download = `math-flashcards-${date}.json`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
       setMessage({ type: "ok", text: "書き出しました" });
     } catch (e) {
-      if (e?.name === "AbortError") return; // ユーザーがキャンセルしただけ
       console.error("書き出しに失敗しました", e);
       setMessage({ type: "error", text: `書き出しに失敗しました：${e.message || e}` });
     }
   }
 
-  // ---- URLリンクで共有（テキストカードのみ） ----
-  async function handleShareUrl() {
-    // テキストのみのカードだけURLに乗せる
-    const textCards = cards.filter((c) => c.frontType === "text");
-    if (textCards.length === 0) {
-      setMessage({ type: "error", text: "URLで共有できるのはテキストカードのみです。写真入りカードはファイルで書き出してください。" });
-      return;
-    }
-
-    // テキストカードが属するデッキだけを絞る
-    const deckIdsInTextCards = new Set(textCards.map((c) => c.deckId));
-    const textDecks = decks.filter((d) => deckIdsInTextCards.has(d.id));
-
-    const payload = {
-      version: 2,
-      exportedAt: Date.now(),
-      decks: textDecks,
-      cards: textCards.map((c) => ({
-        ...c,
-        frontSrc: null,
-        backSrc: null,
-      })),
-      photoLibrary: [],
-      photoGroups: [],
-    };
-
-    const shareUrl = encodeShareUrl(payload);
-
-    try {
-      if (navigator.share) {
-        await navigator.share({ title: "数学カード", text: "このリンクを開くとカードを取り込めます", url: shareUrl });
-        setMessage({ type: "ok", text: "URLを共有しました" });
-      } else {
-        await navigator.clipboard.writeText(shareUrl);
-        setMessage({ type: "ok", text: "URLをコピーしました。相手に送ってください。" });
-      }
-    } catch (e) {
-      if (e?.name === "AbortError") return;
-      // clipboardもだめなら手動コピー用に表示
-      setSharing(shareUrl);
-    }
-  }
-
-  // ---- ファイル読み込み ----
   function handleFileSelected(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    file.text().then((text) => {
-      setPendingJson(text);
-      setPendingLabel(`ファイル「${file.name}」`);
-      setConfirming(true);
-    });
+    setPendingFile(file);
+    setConfirming(true);
     e.target.value = "";
   }
 
-  function confirmImport() {
-    if (!pendingJson) return;
-    const result = onImport(pendingJson);
+  async function confirmImport() {
+    if (!pendingFile) return;
+    const text = await pendingFile.text();
+    const result = onImport(text);
     setConfirming(false);
-    setPendingJson(null);
+    setPendingFile(null);
     setMessage(
       result.ok
         ? { type: "ok", text: "読み込みました" }
@@ -965,95 +839,46 @@ function DataTransferSection({ onExport, onImport, hasData, decks, cards }) {
     );
   }
 
-  const imageCardCount = cards.filter((c) => c.frontType === "image").length;
-  const textCardCount = cards.filter((c) => c.frontType === "text").length;
-
   return (
     <div style={styles.dataSection}>
       <div style={styles.sectionDivider}>
-        <span style={styles.sectionDividerLabel}>共有・引っ越し</span>
+        <span style={styles.sectionDividerLabel}>データの引っ越し</span>
+      </div>
+      <p style={styles.subText}>
+        別のデバイスやブラウザで続けたいときは、ここからファイルを書き出して、もう一方の画面で読み込んでください。
+      </p>
+      <div style={styles.rowButtons}>
+        <button style={styles.secondaryBtn} disabled={!hasData} onClick={handleExport}>
+          書き出す（保存用ファイル）
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="application/json"
+          style={{ display: "none" }}
+          onChange={handleFileSelected}
+        />
+        <button style={styles.secondaryBtn} onClick={() => fileRef.current?.click()}>
+          読み込む
+        </button>
       </div>
 
-      {/* 書き出し（ファイル） */}
-      <p style={styles.shareMethodLabel}>📁 ファイルで共有（全カード対応）</p>
-      <p style={styles.subText}>
-        AirDrop・LINEなどで送れるファイルを作ります。写真入りカードも含めて全部まとめて送れます。
-      </p>
-      <button style={styles.secondaryBtnFull} disabled={!hasData} onClick={handleExport}>
-        書き出す・共有する
-      </button>
+      {message && <p style={message.type === "error" ? styles.dataMessageError : styles.dataMessageOk}>{message.text}</p>}
 
-      {/* URLリンクで共有（テキストカードのみ） */}
-      <p style={{ ...styles.shareMethodLabel, marginTop: 20 }}>🔗 URLリンクで共有（テキストカードのみ）</p>
-      <p style={styles.subText}>
-        リンクを送るだけで相手がそのまま取り込めます。
-        {imageCardCount > 0 && textCardCount === 0 && (
-          <span style={{ color: "#B5482F" }}> このデッキは写真カードのみのためURL共有はできません。ファイルを使ってください。</span>
-        )}
-        {imageCardCount > 0 && textCardCount > 0 && (
-          <span style={{ color: "#8B8270" }}> ※写真カード {imageCardCount} 枚はURLに含まれません（テキストカード {textCardCount} 枚のみ共有）。</span>
-        )}
-      </p>
-      <button
-        style={styles.secondaryBtnFull}
-        disabled={!hasData || textCardCount === 0}
-        onClick={handleShareUrl}
-      >
-        URLをコピー・共有する
-      </button>
-
-      {/* 読み込み */}
-      <p style={{ ...styles.shareMethodLabel, marginTop: 20 }}>📥 ファイルを読み込む</p>
-      <p style={styles.subText}>
-        受け取ったファイル（.json）を選んで取り込みます。URLリンクで受け取った場合は自動で取り込み画面が開きます。
-      </p>
-      <input
-        ref={fileRef}
-        type="file"
-        accept="application/json"
-        style={{ display: "none" }}
-        onChange={handleFileSelected}
-      />
-      <button style={styles.secondaryBtnFull} onClick={() => fileRef.current?.click()}>
-        ファイルを選んで読み込む
-      </button>
-
-      {message && (
-        <p style={message.type === "error" ? styles.dataMessageError : styles.dataMessageOk}>
-          {message.text}
-        </p>
-      )}
-
-      {/* URLコピーできなかった場合の手動コピー用ダイアログ */}
-      {sharing && (
-        <div style={styles.confirmOverlay}>
-          <div style={styles.confirmDialog}>
-            <p style={styles.confirmTitle}>URLをコピーして送ってください</p>
-            <textarea
-              readOnly
-              value={sharing}
-              style={{ ...styles.textArea, fontSize: 11, minHeight: 80 }}
-              onFocus={(e) => e.target.select()}
-            />
-            <button style={styles.primaryBtn} onClick={() => setSharing(false)}>
-              閉じる
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* 読み込み確認ダイアログ */}
       {confirming && (
         <div style={styles.confirmOverlay}>
           <div style={styles.confirmDialog}>
             <p style={styles.confirmTitle}>今のデータを置き換えますか？</p>
             <p style={styles.subText}>
-              {pendingLabel}を読み込むと、今このブラウザに保存されているデッキ・カードはすべて上書きされます。
+              読み込むと、今このブラウザに保存されているデッキ・カードはすべて上書きされます。
             </p>
             <div style={styles.rowButtons}>
               <button
                 style={styles.secondaryBtn}
-                onClick={() => { setConfirming(false); setPendingJson(null); }}
+                onClick={() => {
+                  setConfirming(false);
+                  setPendingFile(null);
+                }}
               >
                 やめる
               </button>
@@ -1215,19 +1040,14 @@ function CaptureScreen({
   const [pendingCards, setPendingCards] = useState(() => restoredDraft?.pendingCards || []);
   const [currentCardIdx, setCurrentCardIdx] = useState(null);
 
-  // onSaveDraft は毎レンダーで新しい関数参照になるため、refで安定化させる。
-  // これにより useEffect の依存配列に含めても不要な再実行が起きない。
-  const onSaveDraftRef = useRef(onSaveDraft);
-  useEffect(() => { onSaveDraftRef.current = onSaveDraft; }, [onSaveDraft]);
-
   // pendingCardsが変わるたびにデバウンスして自動保存（600ms遅延）
   const draftTimerRef = useRef(null);
   useEffect(() => {
-    if (!onSaveDraftRef.current) return;
+    if (!onSaveDraft) return;
     if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
     draftTimerRef.current = setTimeout(() => {
       if (pendingCards.length > 0) {
-        onSaveDraftRef.current({ pendingCards, deckName: deckNameInput });
+        onSaveDraft({ pendingCards, deckName: deckNameInput });
       }
     }, 600);
     return () => clearTimeout(draftTimerRef.current);
@@ -3327,7 +3147,6 @@ const styles = {
 
   // データの引っ越し（エクスポート/インポート）
   dataSection: { marginTop: 32 },
-  shareMethodLabel: { fontSize: 13.5, fontWeight: 700, color: INK, margin: "0 0 4px" },
   dataMessageOk: { fontSize: 13, color: GREEN, fontWeight: 600, marginTop: 4 },
   dataMessageError: { fontSize: 13, color: STAMP, fontWeight: 600, marginTop: 4 },
   backupWarning: {
