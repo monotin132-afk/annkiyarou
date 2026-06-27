@@ -2674,58 +2674,62 @@ function StudyFace({ type, src, text }) {
 
 // ---------- 学習（フリップカード）画面 ----------
 function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
+  // initialized: useEffectでqueueが確定したか
+  const [initialized, setInitialized] = useState(false);
   const [queue, setQueue] = useState([]);
   const [idx, setIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [done, setDone] = useState(false);
-  // セッション中の結果ログ: [{cardId, known}]
-  const [resultLog, setResultLog] = useState([]);
+  const [resultLog, setResultLog] = useState([]); // [{cardId, known}]
 
   // マウント時に1回だけ出題順を確定する。
+  // cards は親の state から毎レンダー新しい参照が来るため依存配列に含めない。
   useEffect(() => {
     let pool = [...cards];
     if (mode === "weak-only") {
       pool = pool.filter((c) => c.level <= 1);
-      pool.sort(() => Math.random() - 0.5);
     } else if (mode === "weak") {
-      pool.sort((a, b) => a.level - b.level || Math.random() - 0.5);
-    } else {
-      pool.sort(() => Math.random() - 0.5);
+      pool.sort((a, b) => a.level - b.level);
     }
+    pool.sort(() => Math.random() - 0.5);
     setQueue(pool);
     setIdx(0);
     setFlipped(false);
     setDone(false);
     setResultLog([]);
+    setInitialized(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const current = queue[idx];
-  const hasBack = current && !!current.backType;
-
-  function next(known) {
-    if (current) {
-      onResult(current.id, known);
-      setResultLog((prev) => [...prev, { cardId: current.id, known }]);
-    }
-    if (idx + 1 >= queue.length) {
-      setDone(true);
-    } else {
-      setIdx(idx + 1);
-      setFlipped(false);
-    }
+  // --- 初期化前：ローディング ---
+  if (!initialized) {
+    return (
+      <div style={styles.screen}>
+        <div style={styles.emptyState}>
+          <div style={styles.emptyGlyph}>…</div>
+        </div>
+      </div>
+    );
   }
 
-  // queueはuseEffect後に確定する。初回レンダー時はまだ空なので
-  // queueが確定した（hasInitialized）かどうかを別フラグで管理する。
-  const hasInitialized = queue.length > 0 || done;
-  const noWeakCards = mode === "weak-only" && hasInitialized && queue.length === 0;
+  // --- 苦手なし（weak-onlyで対象0枚） ---
+  if (mode === "weak-only" && queue.length === 0) {
+    return (
+      <div style={styles.screen}>
+        <header style={styles.headerRow}>
+          <button style={styles.linkBtn} onClick={onExit}>← 戻る</button>
+        </header>
+        <div style={styles.emptyState}>
+          <div style={styles.emptyGlyph}>☺</div>
+          <p style={styles.emptyText}>今のところ苦手なカードはありません</p>
+          <button style={styles.primaryBtn} onClick={onExit}>戻る</button>
+        </div>
+      </div>
+    );
+  }
 
-  // ---------- サマリー画面 ----------
-  // done: 全カードを解き終えた
-  // noWeakCards: weak-onlyモードで対象カードが0枚だった
-  // どちらも「queueが確定した後」でなければ判断しない（初回レンダー誤発火防止）
-  if (hasInitialized && (done || noWeakCards)) {
+  // --- セッション終了：サマリー ---
+  if (done) {
     const total = resultLog.length;
     const correctCount = resultLog.filter((r) => r.known).length;
     const wrongIds = new Set(resultLog.filter((r) => !r.known).map((r) => r.cardId));
@@ -2737,68 +2741,83 @@ function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
         <header style={styles.headerRow}>
           <button style={styles.linkBtn} onClick={onExit}>← 戻る</button>
         </header>
+        <h1 style={styles.h1}>セッション終了</h1>
 
-        {noWeakCards && total === 0 ? (
-          <div style={styles.emptyState}>
-            <div style={styles.emptyGlyph}>☺</div>
-            <p style={styles.emptyText}>今のところ苦手なカードはありません</p>
-            <button style={styles.primaryBtn} onClick={onExit}>戻る</button>
+        <div style={styles.summaryScoreRow}>
+          <div style={{
+            ...styles.summaryScoreCircle,
+            background: `conic-gradient(#3C6E54 0% ${pct}%, #E3DACB ${pct}% 100%)`,
+          }}>
+            <span style={styles.summaryScorePct}>{pct}<span style={styles.summaryScorePctUnit}>%</span></span>
+            <span style={styles.summaryScoreLabel}>正解率</span>
           </div>
-        ) : (
-          <>
-            <h1 style={styles.h1}>セッション終了</h1>
-
-            {/* スコアサークル */}
-            <div style={styles.summaryScoreRow}>
-              <div style={{
-                ...styles.summaryScoreCircle,
-                background: `conic-gradient(#3C6E54 0% ${pct}%, #E3DACB ${pct}% 100%)`,
-              }}>
-                <span style={styles.summaryScorePct}>{pct}<span style={styles.summaryScorePctUnit}>%</span></span>
-                <span style={styles.summaryScoreLabel}>正解率</span>
-              </div>
-              <div style={styles.summaryStats}>
-                <div style={styles.summaryStatItem}>
-                  <span style={styles.summaryStatValue}>{total}</span>
-                  <span style={styles.summaryStatLabel}>出題</span>
-                </div>
-                <div style={styles.summaryStatDivider} />
-                <div style={styles.summaryStatItem}>
-                  <span style={{ ...styles.summaryStatValue, color: "#3C6E54" }}>{correctCount}</span>
-                  <span style={styles.summaryStatLabel}>正解</span>
-                </div>
-                <div style={styles.summaryStatDivider} />
-                <div style={styles.summaryStatItem}>
-                  <span style={{ ...styles.summaryStatValue, color: "#B5482F" }}>{total - correctCount}</span>
-                  <span style={styles.summaryStatLabel}>不正解</span>
-                </div>
-              </div>
+          <div style={styles.summaryStats}>
+            <div style={styles.summaryStatItem}>
+              <span style={styles.summaryStatValue}>{total}</span>
+              <span style={styles.summaryStatLabel}>出題</span>
             </div>
+            <div style={styles.summaryStatDivider} />
+            <div style={styles.summaryStatItem}>
+              <span style={{ ...styles.summaryStatValue, color: "#3C6E54" }}>{correctCount}</span>
+              <span style={styles.summaryStatLabel}>正解</span>
+            </div>
+            <div style={styles.summaryStatDivider} />
+            <div style={styles.summaryStatItem}>
+              <span style={{ ...styles.summaryStatValue, color: "#B5482F" }}>{total - correctCount}</span>
+              <span style={styles.summaryStatLabel}>不正解</span>
+            </div>
+          </div>
+        </div>
 
-            {/* 不正解カード一覧 */}
-            {wrongCards.length > 0 && (
-              <>
-                <div style={styles.sectionDivider}>
-                  <span style={styles.sectionDividerLabel}>もう一度見直したいカード（{wrongCards.length}枚）</span>
+        {wrongCards.length > 0 && (
+          <>
+            <div style={styles.sectionDivider}>
+              <span style={styles.sectionDividerLabel}>もう一度見直したいカード（{wrongCards.length}枚）</span>
+            </div>
+            <div style={styles.summaryWrongGrid}>
+              {wrongCards.map((c) => (
+                <div key={c.id} style={styles.summaryWrongCard}>
+                  <CardThumb src={c.frontSrc} text={c.frontText} />
+                  {c.memo && <p style={styles.summaryCardMemo}>📝 {c.memo}</p>}
                 </div>
-                <div style={styles.summaryWrongGrid}>
-                  {wrongCards.map((c) => (
-                    <div key={c.id} style={styles.summaryWrongCard}>
-                      <CardThumb src={c.frontSrc} text={c.frontText} />
-                      {c.memo && <p style={styles.summaryCardMemo}>📝 {c.memo}</p>}
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-
-            <button style={{ ...styles.primaryBtn, marginTop: 24 }} onClick={onExit}>
-              デッキに戻る
-            </button>
+              ))}
+            </div>
           </>
         )}
+
+        <button style={{ ...styles.primaryBtn, marginTop: 24 }} onClick={onExit}>
+          デッキに戻る
+        </button>
       </div>
     );
+  }
+
+  // --- 通常のカード表示 ---
+  // ここに来た時点で initialized=true, done=false, queue.length>0 が保証される
+  const current = queue[idx];
+  if (!current) {
+    // 念のため（通常は到達しないはず）
+    return (
+      <div style={styles.screen}>
+        <div style={styles.emptyState}>
+          <p style={styles.emptyText}>カードが見つかりません</p>
+          <button style={styles.primaryBtn} onClick={onExit}>戻る</button>
+        </div>
+      </div>
+    );
+  }
+
+  const hasBack = !!current.backType;
+
+  function next(known) {
+    onResult(current.id, known);
+    setResultLog((prev) => [...prev, { cardId: current.id, known }]);
+    if (idx + 1 >= queue.length) {
+      setDone(true);
+    } else {
+      setIdx(idx + 1);
+      setFlipped(false);
+    }
   }
 
   return (
@@ -2826,7 +2845,6 @@ function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
           >
             <div style={styles.flipFace}>
               <span style={styles.faceLabel}>問題</span>
-              {/* ★ボタン：タップしてもフリップしないようにstopPropagation */}
               <button
                 style={{ ...styles.studyStarBtn, color: current.starred ? "#C28A35" : "#D0C8B0" }}
                 onClick={(e) => { e.stopPropagation(); onToggleStar(current.id); }}
