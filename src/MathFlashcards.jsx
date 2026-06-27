@@ -2716,10 +2716,16 @@ function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
     }
   }
 
-  const noWeakCards = mode === "weak-only" && queue.length === 0;
+  // queueはuseEffect後に確定する。初回レンダー時はまだ空なので
+  // queueが確定した（hasInitialized）かどうかを別フラグで管理する。
+  const hasInitialized = queue.length > 0 || done;
+  const noWeakCards = mode === "weak-only" && hasInitialized && queue.length === 0;
 
   // ---------- サマリー画面 ----------
-  if (done || (noWeakCards && queue.length === 0)) {
+  // done: 全カードを解き終えた
+  // noWeakCards: weak-onlyモードで対象カードが0枚だった
+  // どちらも「queueが確定した後」でなければ判断しない（初回レンダー誤発火防止）
+  if (hasInitialized && (done || noWeakCards)) {
     const total = resultLog.length;
     const correctCount = resultLog.filter((r) => r.known).length;
     const wrongIds = new Set(resultLog.filter((r) => !r.known).map((r) => r.cardId));
