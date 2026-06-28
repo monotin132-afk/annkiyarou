@@ -2808,6 +2808,23 @@ function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
         <button style={{ ...styles.primaryBtn, marginTop: 24 }} onClick={onExit}>
           デッキに戻る
         </button>
+
+        {wrongCards.length > 0 && (
+          <button
+            style={{ ...styles.secondaryBtnFull, marginTop: 10 }}
+            onClick={() => {
+              // 不正解カードだけでセッションを再スタート
+              const retryQueue = wrongCards.sort(() => Math.random() - 0.5);
+              setQueue(retryQueue);
+              setIdx(0);
+              setFlipped(false);
+              setDone(false);
+              setResultLog([]);
+            }}
+          >
+            ✕ 不正解の {wrongCards.length} 枚だけもう一度
+          </button>
+        )}
       </div>
     );
   }
