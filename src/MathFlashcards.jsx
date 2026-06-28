@@ -934,34 +934,54 @@ function DataTransferSection({ onExport, onImport, hasData, decks, cards }) {
   const [message, setMessage] = useState(null); // {type: 'ok'|'error', text}
   const [sharing, setSharing] = useState(false);
 
-  // ---- 書き出し（iOS: Web Share API / その他: ダウンロード） ----
+  // ---- 書き出し ----
+  // iOS Safari は .json ファイルの Web Share API 共有を Permission denied でブロックする。
+  // また async 処理を挟むとユーザージェスチャーが失われ share() が失敗する。
+  // そのため以下の優先順位で試みる：
+  //   1. PC/Android: <a download> でファイルダウンロード（最も確実）
+  //   2. iOS Safari: <a> download が効かないので data: URL を新しいタブで開く
+  //      → Safariの「共有」ボタンから AirDrop / ファイルに保存 等を使える
   async function handleExport() {
     try {
       const json = await onExport();
-      const blob = new Blob([json], { type: "application/json" });
       const date = new Date().toISOString().slice(0, 10);
       const fileName = `math-flashcards-${date}.json`;
 
-      // Web Share API（iOS Safari / Android Chrome など）
-      if (navigator.canShare && navigator.canShare({ files: [new File([blob], fileName, { type: "application/json" })] })) {
-        const file = new File([blob], fileName, { type: "application/json" });
-        await navigator.share({ files: [file], title: "数学カード データ" });
-        setMessage({ type: "ok", text: "共有しました" });
-        return;
-      }
-
-      // フォールバック: <a>ダウンロード（PC / 対応ブラウザ）
-      const url = URL.createObjectURL(blob);
+      // --- パターン1: <a download>（Chrome/Firefox/Edge/Android）---
+      // iOS Safari では download 属性が無視されるが試みる
+      const blob = new Blob([json], { type: "application/json" });
+      const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = url;
+      a.href = blobUrl;
       a.download = fileName;
       document.body.appendChild(a);
       a.click();
       a.remove();
-      URL.revokeObjectURL(url);
-      setMessage({ type: "ok", text: "書き出しました" });
+
+      // download が機能したかどうかは判別できないため、
+      // iOS かどうかでメッセージを出し分ける
+      const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
+        (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+      if (isIOS) {
+        // iOS では download が効かないので data: URL で別タブを開く
+        // → Safari の共有シートから「ファイルに保存」「AirDrop」等が使える
+        URL.revokeObjectURL(blobUrl);
+        const dataUrl = "data:application/json;charset=utf-8," + encodeURIComponent(json);
+        const newTab = window.open(dataUrl, "_blank");
+        if (newTab) {
+          setMessage({ type: "ok", text: "新しいタブにデータが開きました。Safari の共有ボタン（□↑）→「ファイルに保存」または AirDrop で保存してください。" });
+        } else {
+          // ポップアップブロックされた場合はコピー
+          await navigator.clipboard.writeText(json).catch(() => {});
+          setMessage({ type: "ok", text: "ポップアップがブロックされました。代わりにデータをクリップボードにコピーしました。メモアプリ等に貼り付けて .json として保存してください。" });
+        }
+      } else {
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        setMessage({ type: "ok", text: "書き出しました" });
+      }
     } catch (e) {
-      if (e?.name === "AbortError") return; // ユーザーがキャンセルしただけ
+      if (e?.name === "AbortError") return;
       console.error("書き出しに失敗しました", e);
       setMessage({ type: "error", text: `書き出しに失敗しました：${e.message || e}` });
     }
