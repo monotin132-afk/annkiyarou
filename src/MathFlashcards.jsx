@@ -934,21 +934,12 @@ function DataTransferSection({ onExport, onImport, hasData, decks, cards }) {
   const [message, setMessage] = useState(null); // {type: 'ok'|'error', text}
   const [sharing, setSharing] = useState(false);
 
-  // ---- 書き出し ----
-  // iOS Safari は .json ファイルの Web Share API 共有を Permission denied でブロックする。
-  // また async 処理を挟むとユーザージェスチャーが失われ share() が失敗する。
-  // そのため以下の優先順位で試みる：
-  //   1. PC/Android: <a download> でファイルダウンロード（最も確実）
-  //   2. iOS Safari: <a> download が効かないので data: URL を新しいタブで開く
-  //      → Safariの「共有」ボタンから AirDrop / ファイルに保存 等を使える
-  async function handleExport() {
+  // ---- 書き出し：PC/Android用（<a download>）----
+  async function handleExportDownload() {
     try {
       const json = await onExport();
       const date = new Date().toISOString().slice(0, 10);
       const fileName = `math-flashcards-${date}.json`;
-
-      // --- パターン1: <a download>（Chrome/Firefox/Edge/Android）---
-      // iOS Safari では download 属性が無視されるが試みる
       const blob = new Blob([json], { type: "application/json" });
       const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -957,32 +948,30 @@ function DataTransferSection({ onExport, onImport, hasData, decks, cards }) {
       document.body.appendChild(a);
       a.click();
       a.remove();
-
-      // download が機能したかどうかは判別できないため、
-      // iOS かどうかでメッセージを出し分ける
-      const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
-        (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-
-      if (isIOS) {
-        // iOS では download が効かないので data: URL で別タブを開く
-        // → Safari の共有シートから「ファイルに保存」「AirDrop」等が使える
-        URL.revokeObjectURL(blobUrl);
-        const dataUrl = "data:application/json;charset=utf-8," + encodeURIComponent(json);
-        const newTab = window.open(dataUrl, "_blank");
-        if (newTab) {
-          setMessage({ type: "ok", text: "新しいタブにデータが開きました。Safari の共有ボタン（□↑）→「ファイルに保存」または AirDrop で保存してください。" });
-        } else {
-          // ポップアップブロックされた場合はコピー
-          await navigator.clipboard.writeText(json).catch(() => {});
-          setMessage({ type: "ok", text: "ポップアップがブロックされました。代わりにデータをクリップボードにコピーしました。メモアプリ等に貼り付けて .json として保存してください。" });
-        }
-      } else {
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-        setMessage({ type: "ok", text: "書き出しました" });
-      }
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+      setMessage({ type: "ok", text: "書き出しました（ダウンロードフォルダを確認してください）" });
     } catch (e) {
       if (e?.name === "AbortError") return;
-      console.error("書き出しに失敗しました", e);
+      setMessage({ type: "error", text: `書き出しに失敗しました：${e.message || e}` });
+    }
+  }
+
+  // ---- 書き出し：iOS Safari用（新タブ → Safariの共有ボタンから保存）----
+  // iOS は <a download> が無効・Web Share API で .json がブロックされるため、
+  // data: URL を新しいタブで開き、Safari の「□↑」共有ボタンから保存してもらう。
+  async function handleExportIOS() {
+    try {
+      const json = await onExport();
+      const dataUrl = "data:application/json;charset=utf-8," + encodeURIComponent(json);
+      const newTab = window.open(dataUrl, "_blank");
+      if (newTab) {
+        setMessage({ type: "ok", text: "新しいタブが開きました。画面下の共有ボタン（□↑）→「ファイルに保存」を選んで保存してください。" });
+      } else {
+        // ポップアップブロック時はクリップボードに逃げる
+        await navigator.clipboard.writeText(json).catch(() => {});
+        setMessage({ type: "ok", text: "ポップアップがブロックされました。データをクリップボードにコピーしました。メモ帳に貼り付けて .json で保存してください。" });
+      }
+    } catch (e) {
       setMessage({ type: "error", text: `書き出しに失敗しました：${e.message || e}` });
     }
   }
@@ -1064,13 +1053,27 @@ function DataTransferSection({ onExport, onImport, hasData, decks, cards }) {
       </div>
 
       {/* 書き出し（ファイル） */}
-      <p style={styles.shareMethodLabel}>📁 ファイルで共有（全カード対応）</p>
+      <p style={styles.shareMethodLabel}>📁 ファイルで書き出す（全カード対応）</p>
       <p style={styles.subText}>
-        AirDrop・LINEなどで送れるファイルを作ります。写真入りカードも含めて全部まとめて送れます。
+        写真入りカードも含めて全部まとめてファイルに書き出せます。別のデバイスへの引っ越しにも使えます。
       </p>
-      <button style={styles.secondaryBtnFull} disabled={!hasData} onClick={handleExport}>
-        書き出す・共有する
+
+      <p style={{ fontSize: 12, fontWeight: 700, color: "#8B8270", margin: "0 0 6px" }}>
+        💻 PC・Android の場合
+      </p>
+      <button style={{ ...styles.secondaryBtnFull, marginBottom: 10 }} disabled={!hasData} onClick={handleExportDownload}>
+        書き出す（ファイルをダウンロード）
       </button>
+
+      <p style={{ fontSize: 12, fontWeight: 700, color: "#8B8270", margin: "0 0 6px" }}>
+        🍎 iPhone・iPad の場合
+      </p>
+      <button style={{ ...styles.secondaryBtnFull, marginBottom: 4 }} disabled={!hasData} onClick={handleExportIOS}>
+        書き出す（Safari で開いて保存）
+      </button>
+      <p style={{ ...styles.subText, fontSize: 11, marginTop: 0 }}>
+        ※ 新しいタブが開いたら、画面下の共有ボタン（□↑）→「ファイルに保存」を選んでください。
+      </p>
 
       {/* URLリンクで共有（テキストカードのみ） */}
       <p style={{ ...styles.shareMethodLabel, marginTop: 20 }}>🔗 URLリンクで共有（テキストカードのみ）</p>
@@ -2845,6 +2848,9 @@ function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
   }
 
   const hasBack = !!current.backType;
+  // starred は親の cards state からリアルタイムで引く（queue はスナップショットなので古いまま）
+  const cardsMap = Object.fromEntries(cards.map((c) => [c.id, c]));
+  const isStarred = !!(cardsMap[current.id]?.starred);
 
   function next(known) {
     onResult(current.id, known);
@@ -2883,10 +2889,10 @@ function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
             <div style={styles.flipFace}>
               <span style={styles.faceLabel}>問題</span>
               <button
-                style={{ ...styles.studyStarBtn, color: current.starred ? "#C28A35" : "#D0C8B0" }}
+                style={{ ...styles.studyStarBtn, color: isStarred ? "#C28A35" : "#D0C8B0" }}
                 onClick={(e) => { e.stopPropagation(); onToggleStar(current.id); }}
               >
-                {current.starred ? "★" : "☆"}
+                {isStarred ? "★" : "☆"}
               </button>
               <StudyFace type={current.frontType} src={current.frontSrc} text={current.frontText} />
               {hasBack ? (
@@ -2898,10 +2904,10 @@ function StudyScreen({ cards, mode, onResult, onToggleStar, onExit }) {
             <div style={{ ...styles.flipFace, ...styles.flipFaceBack }}>
               <span style={styles.faceLabelBack}>答え</span>
               <button
-                style={{ ...styles.studyStarBtn, color: current.starred ? "#C28A35" : "#D0C8B0" }}
+                style={{ ...styles.studyStarBtn, color: isStarred ? "#C28A35" : "#D0C8B0" }}
                 onClick={(e) => { e.stopPropagation(); onToggleStar(current.id); }}
               >
-                {current.starred ? "★" : "☆"}
+                {isStarred ? "★" : "☆"}
               </button>
               {hasBack && <StudyFace type={current.backType} src={current.backSrc} text={current.backText} />}
               {current.memo && (
